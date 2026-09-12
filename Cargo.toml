@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vok-core",
+    "crates/vok-infra",
+    "crates/vok-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Vok Team"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# Internal workspace crates
+vok-core = { path = "crates/vok-core" }
+vok-infra = { path = "crates/vok-infra" }
+
+# Logging and Diagnostics
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error Handling & Utilities
+thiserror = "1.0"
+crossbeam-channel = "0.5"
+
+# Linux input & storage
+evdev = "0.12"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# GTK4 & UI stack
+gtk4 = { version = "0.9", features = ["v4_14"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }

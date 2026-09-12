@@ -1,0 +1,16 @@
+[package]
+name = "vok-infra"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vok-core.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+crossbeam-channel.workspace = true
+evdev = "0.12"
+x11rb = "0.14"
+
+[dev-dependencies]

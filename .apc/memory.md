@@ -10,12 +10,35 @@
 
 ## §0 快照
 
-- **Status**: M0 规划与 APC 提示词工程框架建立完成；准备启动 M0 宿主内核原型构建。
-- **Latest progress**: 确立 Rust + GTK 4 + gtk4-layer-shell + evdev 原生技术栈；建立 .apc/ 架构决策、规范与多 Agent 适配器体系；制定 M0~M4 里程碑。
-- **Next step**: 搭建 Cargo 工作区（vok-core / vok-infra / vok-app），实现基于 evdev 的独立物理按键状态机与 GTK4 全屏浮层骨架。
-- **Known issues**: 用户运行需要处于 `input` 用户组以访问 `/dev/input/event*`；首期重点解决 Wayland 下拖拽中捕获文件与呼出时序。
+- **Status**: M0 宿主内核与拖动呼出入站全面落地并通过实机验证；准备向 M1（三栏骨架与双货架 MVP）演进。
+- **Latest progress**: 落地 Slice 0.4（X11 `_NET_WORKAREA` 工作区任务栏避让）与 Slice 0.5（GTK4 全屏半透明遮罩与 `GtkDropTarget` 外部拖入）；通过 `async-channel` 与 `glib::spawn_future_local` 实现原生零 sleep 事件桥接；实机成功探测并避让系统 Dock（`3068x1936+132+64`），Release 二进制体积仅 1.5MB，全工作区测试 12 项全绿通过。
+- **Next step**: 推进 M1 里程碑：实现 1:2:1 主界面横向三栏骨架、卡片防截断高度动态整除算法与启动台/中转站双货架。
+- **Known issues**: 真实硬件按键监听需用户处于 `input` 组（当前已完备支持内置 Mock 仿真）；Wayland 下后续需接入 `gtk4-layer-shell` 动态编译 feature。
 
 ## §0A 最近会话
+
+### Session 2026-09-12 - 启动 M0 宿主内核开发与核心状态机落地
+
+- 批准 M0 里程碑详细实施规划（`m0_planning.md`），定义 6 大纵向切片。
+- 实机检测并自动安装 Rust 1.98.1 稳定版工具链。
+- 初始化 Cargo Workspace 多 crate 架构：`crates/vok-core`、`crates/vok-infra`、`crates/vok-app`。
+- 实现 `vok-core`：`GenerationId` 严格代次、`HotkeyMode`（250ms 长短按判定）、`SessionStateMachine`（无 sleep、原子因果推进与旧代过滤）。
+- 实现 `vok-infra`：基于 Linux 内核 `evdev` 的物理电平事件监听器与 `MockInputMonitor` 仿真通道；实现 `WindowAdapter` 基于 X11 EWMH `_NET_WORKAREA` 的任务栏避让算法。
+- 实现 `vok-app`：构建 GTK 4 全屏深色毛玻璃遮罩窗口、`GtkDropTarget` 外部拖拽入站中转、Esc 与空白处点击关闭，并通过 `async-channel` + `glib::spawn_future_local` 达成零 sleep 异步事件桥接。
+- 编写并全绿通过 12 项单元测试，实机成功运行并准确计算当前多屏工作区避让（`3068x1936+132+64`），Release 生产二进制仅 1.5MB。
+
+### Session 2026-09-12 - 总体功能规划与核心交互范式深度确立
+
+- 用户全面补充总体功能规范：
+  1. 界面与焦点：全屏覆盖避让任务栏；快捷键/托盘呼出，失焦/Esc/快捷键关闭；呼出聚焦搜索框，关闭精准返还原前台输入控件；
+  2. 1:2:1 横向布局：左启动台（25%）、中中转站（50%）、右剪贴板（25%），顶部常驻联动搜索框；
+  3. 两个副界面：独立设置小窗口（托盘/齿轮双入口）与全局增强搜索视图（架构预留）；
+  4. 启动台：一行 4 项，卡片高度整除防截断算法，左键单击启动并隐藏，右键菜单，拖动排序，外部拖入添加；
+  5. 中转站：临时文件流动货架，双向拖拽，左键单击直接粘贴，右键菜单，拖动排序，高度与启动台完全对齐；
+  6. 剪贴板：文本/图片/文件捕获，单击直接粘贴，复制，删除；
+  7. 性能与持久化：采用视口回收虚拟滚动（`GtkGridView`/`GtkListView`），保障海量数据下内存恒定 < 40MB、CPU 低开销，SQLite 单写者串行持久化；
+  8. 定位原则：Workbench-APP 作为功能与前端成熟范本，作为技术架构失败反面教材，绝不移植其代码。
+- 全量更新 `.apc/manifest.md`、`.apc/decisions.md`（追加 §7~§9）、`.apc/rules.md`（追加 R8~R11）、`docs/ARCHITECTURE.md` 与 `docs/MILESTONES.md`。
 
 ### Session 2026-09-10 - 初始化项目规划与建立 APC 架构体系
 

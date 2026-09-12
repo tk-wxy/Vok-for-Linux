@@ -1,0 +1,46 @@
+mod app;
+mod overlay;
+
+use evdev::Key;
+use gtk4::glib;
+use tracing::{info, warn, Level};
+use tracing_subscriber::FmtSubscriber;
+use vok_infra::input::{EvdevMonitor, MockInputMonitor};
+
+use crate::app::VokApp;
+
+fn main() -> glib::ExitCode {
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("设置默认日志器失败");
+
+    info!("=== Vok (Linux) M0 宿主内核原型启动 ===");
+
+    // 尝试启动基于 Linux 内核 evdev 的物理按键监听 (以 KEY_SPACE 或 KEY_F12 为例)
+    let (event_rx, _evdev_handle, _mock_handle) = match EvdevMonitor::start(Key::KEY_F12) {
+        Ok(monitor) => {
+            info!("【硬件按键监听已就绪】成功独占监听 /dev/input 物理 F12 按键");
+            let rx = monitor.event_receiver();
+            (rx, Some(monitor), None)
+        }
+        Err(e) => {
+            warn!("未能接入硬件 evdev (原因: {:?})", e);
+            warn!("启动 Mock 仿真输入模式：系统将在 1.5 秒后自动模拟按键呼出以供验证");
+            let mock = MockInputMonitor::new();
+            let rx = mock.event_receiver();
+
+            let mock_tx = mock.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                info!("【仿真触发】模拟按下呼出快捷键...");
+                mock_tx.simulate_press(88); // F12 keycode
+            });
+
+            (rx, None, Some(mock))
+        }
+    };
+
+    let app = VokApp::new(event_rx);
+    app.run()
+}

@@ -1,0 +1,17 @@
+[package]
+name = "vok-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+vok-core.workspace = true
+vok-infra.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+crossbeam-channel.workspace = true
+async-channel = "2.3"
+evdev.workspace = true
+gtk4.workspace = true
+libadwaita.workspace = true

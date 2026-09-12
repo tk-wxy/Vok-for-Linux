@@ -1,0 +1,12 @@
+[package]
+name = "vok-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
