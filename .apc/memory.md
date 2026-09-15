@@ -10,12 +10,18 @@
 
 ## §0 快照
 
-- **Status**: M0 宿主内核与拖动呼出入站全面落地并通过实机验证；准备向 M1（三栏骨架与双货架 MVP）演进。
-- **Latest progress**: 落地 Slice 0.4（X11 `_NET_WORKAREA` 工作区任务栏避让）与 Slice 0.5（GTK4 全屏半透明遮罩与 `GtkDropTarget` 外部拖入）；通过 `async-channel` 与 `glib::spawn_future_local` 实现原生零 sleep 事件桥接；实机成功探测并避让系统 Dock（`3068x1936+132+64`），Release 二进制体积仅 1.5MB，全工作区测试 12 项全绿通过。
-- **Next step**: 推进 M1 里程碑：实现 1:2:1 主界面横向三栏骨架、卡片防截断高度动态整除算法与启动台/中转站双货架。
+- **Status**: M1 里程碑规划归档完成，7 大纵向切片与依赖拓扑确立；准备进入 Slice 1.1 开发。
+- **Latest progress**: 深入完成 M1 架构分析与切片拆解；梳理不变量、布局整除数学算法、SQLite WAL 单写者 Actor、虚拟滚动视口回收与桌面服务集成方案；正式归档 `docs/m1_planning.md`。
+- **Next step**: 执行 Slice 1.1：在 `vok-core` 中落地 `LauncherItem` / `StageItem` 领域模型与 `NoClippingLayoutCalculator` 卡片防截断高度动态整除算法及纯单元测试。
 - **Known issues**: 真实硬件按键监听需用户处于 `input` 组（当前已完备支持内置 Mock 仿真）；Wayland 下后续需接入 `gtk4-layer-shell` 动态编译 feature。
 
 ## §0A 最近会话
+
+### Session 2026-09-16 - M1 架构分析与纵向切片规划归档
+
+- 深入分析 M1 里程碑（三栏骨架与双货架 MVP）的核心技术约束与实现难点。
+- 确立 7 大纵向实施切片（切片 1.1 领域模型与整除算法 -> 切片 1.2 SQLite WAL 存储 -> 切片 1.3 桌面服务与缩略图流水线 -> 切片 1.4 三栏骨架与动态对齐 -> 切片 1.5 启动台货架 -> 切片 1.6 中转站货架 -> 切片 1.7 门禁验收）。
+- 用户确认方案，正式归档 `docs/m1_planning.md`，将最旧的 2026-09-10 会话移至 `history.md`，维护 §0A 3 次上限约束。
 
 ### Session 2026-09-12 - 启动 M0 宿主内核开发与核心状态机落地
 
@@ -39,13 +45,6 @@
   7. 性能与持久化：采用视口回收虚拟滚动（`GtkGridView`/`GtkListView`），保障海量数据下内存恒定 < 40MB、CPU 低开销，SQLite 单写者串行持久化；
   8. 定位原则：Workbench-APP 作为功能与前端成熟范本，作为技术架构失败反面教材，绝不移植其代码。
 - 全量更新 `.apc/manifest.md`、`.apc/decisions.md`（追加 §7~§9）、`.apc/rules.md`（追加 R8~R11）、`docs/ARCHITECTURE.md` 与 `docs/MILESTONES.md`。
-
-### Session 2026-09-10 - 初始化项目规划与建立 APC 架构体系
-
-- 用户确认废弃原基于 Tauri/Web 的 Workbench-APP 架构，启动原生 Linux 效率桌面工作台 Vok (Linux)。
-- 明确核心交互为“中转站 (Stage) + 拖拽中全局呼出并丢入 (Mid-drag Summon) + 全屏沉浸面板”。
-- 确立技术选型：Rust + GTK 4 + gtk4-layer-shell + Linux 内核 evdev / uinput + SQLite WAL。
-- 完整搭建 APC 知识库与规则体系：`.apc/manifest.md`、`.apc/decisions.md`、`.apc/rules.md`、`.apc/workflow.md`、`.apc/memory.md`、`docs/ARCHITECTURE.md`、`docs/MILESTONES.md` 以及根目录各 Agent 适配器文件。
 
 ## 指引
 
