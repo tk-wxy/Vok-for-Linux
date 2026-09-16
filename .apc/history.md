@@ -25,3 +25,14 @@
   7. 性能与持久化：采用视口回收虚拟滚动（`GtkGridView`/`GtkListView`），保障海量数据下内存恒定 < 40MB、CPU 低开销，SQLite 单写者串行持久化；
   8. 定位原则：Workbench-APP 作为功能与前端成熟范本，作为技术架构失败反面教材，绝不移植其代码。
 - 全量更新 `.apc/manifest.md`、`.apc/decisions.md`（追加 §7~§9）、`.apc/rules.md`（追加 R8~R11）、`docs/ARCHITECTURE.md` 与 `docs/MILESTONES.md`。
+
+### Session 2026-09-12 - 启动 M0 宿主内核开发与核心状态机落地
+
+- 批准 M0 里程碑详细实施规划（`m0_planning.md`），定义 6 大纵向切片。
+- 实机检测并自动安装 Rust 1.98.1 稳定版工具链。
+- 初始化 Cargo Workspace 多 crate 架构：`crates/vok-core`、`crates/vok-infra`、`crates/vok-app`。
+- 实现 `vok-core`：`GenerationId` 严格代次、`HotkeyMode`（250ms 长短按判定）、`SessionStateMachine`（无 sleep、原子因果推进与旧代过滤）。
+- 实现 `vok-infra`：基于 Linux 内核 `evdev` 的物理电平事件监听器与 `MockInputMonitor` 仿真通道；实现 `WindowAdapter` 基于 X11 EWMH `_NET_WORKAREA` 的任务栏避让算法。
+- 实现 `vok-app`：构建 GTK 4 全屏深色毛玻璃遮罩窗口、`GtkDropTarget` 外部拖拽入站中转、Esc 与空白处点击关闭，并通过 `async-channel` + `glib::spawn_future_local` 达成零 sleep 异步事件桥接。
+- 编写并全绿通过 12 项单元测试，实机成功运行并准确计算当前多屏工作区避让（`3068x1936+132+64`），Release 生产二进制仅 1.5MB。
+

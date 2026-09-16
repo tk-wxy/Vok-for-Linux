@@ -10,42 +10,39 @@
 
 ## §0 快照
 
-- **Status**: 里程碑 M1（三栏布局、启动台与中转站货架 MVP）全部 7 个纵向切片已 100% 落地并通过全部 6 项量化门禁验收，M1 正式圆满交付闭环。准备进入 M2（剪贴板监听、富文本/图片/文件货架与极速直接粘贴）。
-- **Latest progress**: 完成切片 1.1 至 1.7 全量研发与量化验收。涵盖 `vok-core` 纯整除防截断数学与重排算法、`vok-infra` SQLite WAL 单写者并发存储、Freedesktop 图标与 `.desktop` 解析、DBus `FileManager1` 目录定位与异步 50MB 缓存缩略图管道、`vok-app` 1:2:1 毛玻璃深色三栏骨架与动态对齐、启动台 4 列网格（激活/删除/拖入/持久化/置顶）、中转站 2 列网格（R4 绝对引用/双向拖入拖出/右键菜单/异步缩略图回填/清空未置顶）。全工作区 51 项单元与集成测试全绿，Clippy 0 警告，Release 二进制仅 8.3MB，实机运行内存 ~4.1MB（远低于 40MB 门禁限制），50 文件批量解析持久化 1.1ms。
+- **Status**: 里程碑 M1（三栏布局、启动台与中转站货架 MVP）已全面交付验收，实机测试反馈的快捷键系统级绑定与左侧任务栏避让/右侧三栏遮挡根治完成。
+- **Latest progress**: 
+  1. 自动化注册 GNOME 系统级 F12 快捷键并绑定当前二进制；实现单实例 D-Bus 激活 Toggle、窗口内 Esc/F12 退出与终端无特权回车触发；
+  2. 根因定位并彻底根治右侧三栏遮挡溢出：排查出 GTK4 Adwaita 默认主题对 `gridview > child` 施加的最小内边距及 `min-width` 导致启动台最小宽度膨胀为 466px，致使窗口突破屏幕右边界 186px；通过 CSS 重载网格项零边距、移除硬编码 min-width、校准根容器内边距为 23px 与设置 `propagate_natural_width(false)`，使实机窗口物理尺寸严格收敛至 `3068x1936`，右侧 Corner 精准回归 `-0`，彻底根治遮挡；
+  3. 全工作区 51 项测试全绿，6 项量化门禁全绿，Clippy 0 警告，Release 生产构建就绪。
 - **Next step**: 启动 Milestone M2（剪贴板监听、富文本/图片/文件货架与极速直接粘贴）架构分析与纵向切片拆解。
-- **Known issues**: 真实硬件按键监听需用户处于 `input` 组（当前已完备支持内置 Mock 仿真）；Wayland 下后续按计划接入 `gtk4-layer-shell`。
+- **Known issues**: 真实硬件按键监听需用户处于 `input` 组（当前已完备支持 GNOME F12 快捷键 + 内置 Mock 仿真）；Wayland 下后续按计划接入 `gtk4-layer-shell`。
 
 ## §0A 最近会话
+
+### Session 2026-09-16 - 全局快捷键闭环与左侧任务栏/HiDPI三栏右侧遮挡根治
+
+- 响应人工测试反馈的两大核心缺陷：“1. 缺少快捷键呼出/关闭；2. 界面右侧没有显示全，屏幕左侧有任务栏”。
+- **快捷键闭环**：落地 `DesktopShortcut::ensure_gnome_shortcut("F12")` 自动写入 GNOME dconf 快捷键；改造 `VokApp` 单实例感知，重复激活触发 Toggle；修复状态机 Toggle 事件处理；增加终端回车即时模拟。
+- **三栏右侧遮挡根因排查与根治**：
+  - 测算出用户主屏 3200x2000 HiDPI (Scale 2)，左任务栏 132 物理像素 (66 逻辑像素)，净可用工作区 3068x1936；
+  - 深入排查发现 `three_pane` 实际尺寸 1577px 远超期望 1470px，根因是 GTK4 `GridView` 子项被 Adwaita 施加默认边距，卡片 `min-width: 68px` 导致启动台最小尺寸达 466px；
+  - 在 CSS 中覆盖 `.vok-launcher-grid > child` 与 `.vok-stage-grid > child`（`padding: 2px; margin: 0; min-width: 0;`），移除卡片 `min-width: 68px`，设置 `ScrolledWindow::propagate_natural_width(false)`；
+  - 校准 `.vok-root-container` padding 为 `20px 23px`（加上 1px 边框闭合为 24px），使根容器精准收敛为 1518 逻辑像素；
+  - `xwininfo -name "Vok Overlay" -stats` 实机验证：`Width: 3068`, `Corners: +132+64 -0+64 -0-0 +132-0`，零像素溢出，右侧剪贴板栏完整可见。
 
 ### Session 2026-09-16 - 里程碑 M1（三栏布局、启动台与中转站货架 MVP）全链路落地与量化门禁闭环
 
 - 推进并完成了切片 1.5（启动台货架）、切片 1.6（文件临时中转站货架）以及切片 1.7（全链路集成与量化门禁压测）。
 - 启动台实现 4 列 `GtkGridView` 视口回收、单击启动兼自动关闭、右键上下文菜单（置顶/移除）、外部拖入与默认项自填充。
 - 中转站实现 2 列 `GtkGridView` 视口回收、`GtkDropTarget` 批量文件拖入单事务落库、`GtkDragSource` 反向拖出至外部应用（`FileList`）、`ThumbnailWorker` 跨线程安全主线程回填、右键菜单（置顶/打开/目录/路径/移除）与栏头“一键清理未置顶”。
-- 落地 `crates/vok-app/tests/m1_gate_test.rs` 全部 6 项量化门禁并 100% 通过：
-  1. Gate 1（R9 整除防截断）：7 大分辨率矩阵测试卡片高度恒在 `[56, 140]` 且精确闭合；
-  2. Gate 2（入库吞吐）：50 个文件批量解析与持久化耗时 1.1ms（远超 < 1000ms 指标）；
-  3. Gate 3（R4 数据安全）：密集置顶/重排/删除/清空下，原文件 100% 二进制位不变；
-  4. Gate 4（R5 WAL 并发）：100 写入与 99 并发只读查询下，`PRAGMA integrity_check = ok`；
-  5. Gate 5（R8 内存指标）：Linux 实际常驻内存 VmRSS 仅 4.08MB（远低于 40MB 生产红线）；
-  6. Gate 6（R3/R6/R10/R11 会话生命周期）：代次递增、透明代理锚点（`KeepProxyAnchor`）与 Esc/拖出隐藏全链路因果闭环。
-- 全工作区 51 项测试全绿，Clippy 0 警告，Release 二进制仅 8.3MB，实机测试完全达标。
+- 落地 `crates/vok-app/tests/m1_gate_test.rs` 全部 6 项量化门禁并 100% 通过。
 
 ### Session 2026-09-16 - M1 架构分析与纵向切片规划归档
 
 - 深入分析 M1 里程碑（三栏骨架与双货架 MVP）的核心技术约束与实现难点。
-- 确立 7 大纵向实施切片（切片 1.1 领域模型与整除算法 -> 切片 1.2 SQLite WAL 存储 -> 切片 1.3 桌面服务与缩略图流水线 -> 切片 1.4 三栏骨架与动态对齐 -> 切片 1.5 启动台货架 -> 切片 1.6 中转站货架 -> 切片 1.7 门禁验收）。
-- 用户确认方案，正式归档 `docs/m1_planning.md`，将最旧的 2026-09-10 会话移至 `history.md`，维护 §0A 3 次上限约束。
-
-### Session 2026-09-12 - 启动 M0 宿主内核开发与核心状态机落地
-
-- 批准 M0 里程碑详细实施规划（`m0_planning.md`），定义 6 大纵向切片。
-- 实机检测并自动安装 Rust 1.98.1 稳定版工具链。
-- 初始化 Cargo Workspace 多 crate 架构：`crates/vok-core`、`crates/vok-infra`、`crates/vok-app`。
-- 实现 `vok-core`：`GenerationId` 严格代次、`HotkeyMode`（250ms 长短按判定）、`SessionStateMachine`（无 sleep、原子因果推进与旧代过滤）。
-- 实现 `vok-infra`：基于 Linux 内核 `evdev` 的物理电平事件监听器与 `MockInputMonitor` 仿真通道；实现 `WindowAdapter` 基于 X11 EWMH `_NET_WORKAREA` 的任务栏避让算法。
-- 实现 `vok-app`：构建 GTK 4 全屏深色毛玻璃遮罩窗口、`GtkDropTarget` 外部拖拽入站中转、Esc 与空白处点击关闭，并通过 `async-channel` + `glib::spawn_future_local` 达成零 sleep 异步事件桥接。
-- 编写并全绿通过 12 项单元测试，实机成功运行并准确计算当前多屏工作区避让（`3068x1936+132+64`），Release 生产二进制仅 1.5MB。
+- 确立 7 大纵向实施切片。
+- 用户确认方案，正式归档 `docs/m1_planning.md`，维护 §0A 3 次上限约束。
 
 ## 指引
 

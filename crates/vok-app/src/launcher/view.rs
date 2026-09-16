@@ -163,6 +163,8 @@ impl LauncherView {
         let scrolled_window = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
             .vscrollbar_policy(PolicyType::Automatic)
+            .propagate_natural_width(false)
+            .propagate_natural_height(false)
             .child(&grid_view)
             .hexpand(true)
             .vexpand(true)

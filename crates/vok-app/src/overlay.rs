@@ -41,34 +41,67 @@ impl OverlayWindow {
             let monitors = display.monitors();
             if let Some(monitor) = monitors.item(0).and_downcast::<gtk4::gdk::Monitor>() {
                 let rect = monitor.geometry();
-                let scale = monitor.scale_factor();
+                let scale = monitor.scale_factor().max(1);
                 info!(
-                    "检测到主显示器: 逻辑尺寸 {}x{}, 缩放比={}",
+                    "检测到主显示器: 逻辑尺寸 {}x{}, 缩放比={}, 原始工作区: {}",
                     rect.width(),
                     rect.height(),
-                    scale
+                    scale,
+                    geom
                 );
-                // 若 X11 物理尺寸大于逻辑尺寸且 scale > 1，进行换算
+                // 1. 获取左侧任务栏 (Dock) 与顶部状态栏的实际物理->逻辑避让偏移
+                let dock_offset_x = if geom.x > 0 && scale > 1 && geom.x >= rect.x() + 30 {
+                    (geom.x / scale) as u32
+                } else if geom.x > 0 {
+                    geom.x as u32
+                } else {
+                    0
+                };
+                let panel_offset_y = if geom.y > 0 && scale > 1 && geom.y >= rect.y() + 20 {
+                    (geom.y / scale) as u32
+                } else if geom.y > 0 {
+                    geom.y as u32
+                } else {
+                    0
+                };
+
+                // 2. 扣除左侧任务栏后的净可用宽度 (严防超出屏幕右边界)
+                let net_screen_w = (rect.width() as u32).saturating_sub(dock_offset_x);
                 let w = if geom.width > rect.width() as u32 && scale > 1 {
-                    geom.width / scale as u32
-                } else if geom.width > 0 && geom.width <= rect.width() as u32 {
+                    (geom.width / scale as u32).min(net_screen_w)
+                } else if geom.width > 0 && geom.width <= net_screen_w {
                     geom.width
                 } else {
-                    rect.width() as u32
+                    net_screen_w
                 };
+
+                let net_screen_h = (rect.height() as u32).saturating_sub(panel_offset_y);
                 let h = if geom.height > rect.height() as u32 && scale > 1 {
-                    geom.height / scale as u32
-                } else if geom.height > 0 && geom.height <= rect.height() as u32 {
+                    (geom.height / scale as u32).min(net_screen_h)
+                } else if geom.height > 0 && geom.height <= net_screen_h {
                     geom.height
                 } else {
-                    rect.height() as u32
+                    net_screen_h
                 };
-                (w, h)
+
+                // 3. 预留右侧与底部 16px 安全间隙，确保三栏完全居于屏幕可见区，绝不贴边或溢出
+                let safe_w = w.saturating_sub(16);
+                let safe_h = h.saturating_sub(12);
+
+                info!(
+                    "工作区避让计算完成: 任务栏左避让={}px, 顶避让={}px | 最终三栏可用尺寸: {}x{}",
+                    dock_offset_x,
+                    panel_offset_y,
+                    safe_w,
+                    safe_h
+                );
+
+                (safe_w, safe_h)
             } else {
-                (geom.width, geom.height)
+                (geom.width.saturating_sub(16), geom.height.saturating_sub(12))
             }
         } else {
-            (geom.width, geom.height)
+            (geom.width.saturating_sub(16), geom.height.saturating_sub(12))
         };
 
         let window = ApplicationWindow::builder()
@@ -79,8 +112,8 @@ impl OverlayWindow {
             .default_height(logical_height as i32)
             .build();
 
-        // 窗口最大化避让任务栏 (在 GNOME 下自动贴合工作区)
-        window.maximize();
+        // 不调用 maximize，直接使用精准计算的逻辑几何尺寸
+        // window.maximize();
         window.add_css_class("vok-window");
 
         // 1. 加载全局深色毛玻璃 CSS 主题
@@ -133,6 +166,16 @@ impl OverlayWindow {
         root_box.append(&footer_label);
 
         window.set_child(Some(&root_box));
+
+        three_pane.debug_sizes();
+        let (w_header, _) = header.widget().preferred_size();
+        let (w_pane, _) = three_pane.widget().preferred_size();
+        let (w_root, _) = root_box.preferred_size();
+        info!("【尺寸排查】header min={} nat={}, three_pane min={} nat={}, root min={} nat={}",
+            w_header.width(), w_header.width(),
+            w_pane.width(), w_pane.width(),
+            w_root.width(), w_root.width()
+        );
 
         // 7. 注册 Esc / F12 快捷键关闭
         let key_controller = EventControllerKey::new();

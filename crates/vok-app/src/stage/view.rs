@@ -118,6 +118,7 @@ impl StageView {
             let title_label = Label::builder()
                 .css_classes(["vok-stage-card-title"])
                 .ellipsize(EllipsizeMode::End)
+                .max_width_chars(16)
                 .hexpand(true)
                 .halign(Align::Start)
                 .build();
@@ -141,6 +142,8 @@ impl StageView {
             let path_label = Label::builder()
                 .css_classes(["vok-stage-card-path"])
                 .ellipsize(EllipsizeMode::Middle)
+                .max_width_chars(20)
+                .hexpand(true)
                 .halign(Align::Start)
                 .build();
 
@@ -293,6 +296,8 @@ impl StageView {
         let scrolled_window = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
             .vscrollbar_policy(PolicyType::Automatic)
+            .propagate_natural_width(false)
+            .propagate_natural_height(false)
             .child(&grid_view)
             .hexpand(true)
             .vexpand(true)

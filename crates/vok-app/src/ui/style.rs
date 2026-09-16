@@ -13,7 +13,7 @@ pub fn apply_theme() {
             background-color: rgba(18, 20, 28, 0.92);
             border: 1px solid rgba(255, 255, 255, 0.12);
             border-radius: 20px;
-            padding: 20px 24px;
+            padding: 20px 23px;
         }
 
         /* 顶部 Header */
@@ -146,13 +146,18 @@ pub fn apply_theme() {
             background-color: transparent;
         }
 
+        .vok-launcher-grid > child {
+            padding: 2px;
+            margin: 0;
+            min-width: 0;
+        }
+
         .vok-launcher-card {
             background-color: rgba(255, 255, 255, 0.035);
             border: 1px solid rgba(255, 255, 255, 0.06);
             border-radius: 12px;
-            padding: 8px 4px;
-            min-width: 68px;
-            min-height: 68px;
+            padding: 6px 2px;
+            min-height: 60px;
             transition: all 120ms ease;
         }
 
@@ -174,6 +179,12 @@ pub fn apply_theme() {
         /* 中转站网格与卡片 */
         .vok-stage-grid {
             background-color: transparent;
+        }
+
+        .vok-stage-grid > child {
+            padding: 2px;
+            margin: 0;
+            min-width: 0;
         }
 
         .vok-stage-card {

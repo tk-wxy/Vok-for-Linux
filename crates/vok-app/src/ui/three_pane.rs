@@ -96,13 +96,31 @@ impl ThreePaneContainer {
         width: u32,
         height: u32,
     ) -> (ComputedThreePaneLayout, ComputedCardLayout) {
-        LayoutAdapter::apply_layout(
+        let res = LayoutAdapter::apply_layout(
             width,
             height,
             &self.launcher_pane,
             &self.stage_pane,
             &self.clipboard_pane,
-        )
+        );
+        let (wl, _) = self.launcher_pane.preferred_size();
+        let (ws, _) = self.stage_pane.preferred_size();
+        let (wc, _) = self.clipboard_pane.preferred_size();
+        tracing::info!("【三栏子部件尺寸】launcher={}, stage={}, clipboard={}", wl.width(), ws.width(), wc.width());
+        res
+    }
+
+    pub fn debug_sizes(&self) {
+        let (wl, _) = self.launcher_pane.preferred_size();
+        let (ws, _) = self.stage_pane.preferred_size();
+        let (wc, _) = self.clipboard_pane.preferred_size();
+        let (wt, _) = self.container.preferred_size();
+        tracing::info!("【三栏详细尺寸】launcher min={} nat={}, stage min={} nat={}, clipboard min={} nat={}, container min={} nat={}",
+            wl.width(), wl.width(),
+            ws.width(), ws.width(),
+            wc.width(), wc.width(),
+            wt.width(), wt.width()
+        );
     }
 
     // ==================== 内部构建辅助函数 ====================
@@ -235,6 +253,8 @@ impl ThreePaneContainer {
         let scroll = ScrolledWindow::builder()
             .hscrollbar_policy(gtk4::PolicyType::Never)
             .vscrollbar_policy(gtk4::PolicyType::Automatic)
+            .propagate_natural_width(false)
+            .propagate_natural_height(false)
             .vexpand(true)
             .build();
 
