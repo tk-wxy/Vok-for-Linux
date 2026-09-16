@@ -26,19 +26,13 @@ fn main() -> glib::ExitCode {
             let mock = MockInputMonitor::new();
             let rx = mock.event_receiver();
 
-            let mock_tx = mock.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                info!("【仿真触发】模拟按下呼出快捷键...");
-                mock_tx.simulate_press(88); // F12 keycode
-            });
 
             let mock_tx_stdin = mock.clone();
             std::thread::spawn(move || {
                 use std::io::BufRead;
                 let stdin = std::io::stdin();
                 info!("【人工测试提示】终端按回车键 (Enter) 即可随时再次呼出 Vok 工作台，输入 q 退出");
-                for line in stdin.lock().lines().flatten() {
+                for line in stdin.lock().lines().map_while(Result::ok) {
                     let cmd = line.trim();
                     if cmd == "q" || cmd == "quit" {
                         std::process::exit(0);

@@ -15,6 +15,11 @@ use vok_infra::window::WindowAdapter;
 
 use crate::overlay::OverlayWindow;
 
+struct AppState {
+    overlay: Rc<OverlayWindow>,
+    state_machine: Rc<RefCell<SessionStateMachine>>,
+}
+
 pub struct VokApp {
     app: Application,
 }
@@ -26,11 +31,46 @@ impl VokApp {
             .build();
 
         let event_rx = Arc::new(event_rx);
+        let state: Rc<RefCell<Option<AppState>>> = Rc::new(RefCell::new(None));
 
+        let state_clone = state.clone();
         app.connect_activate(move |app| {
-            info!("Vok GTK 应用激活...");
+            // 若已有实例在运行，则直接切换显隐状态 (Toggle)
+            if let Some(ref current) = *state_clone.borrow() {
+                let overlay = current.overlay.clone();
+                let sm = current.state_machine.clone();
+                let is_visible = overlay.is_visible();
 
-            // 0. 初始化持久化 SQLite WAL 存储
+                if is_visible {
+                    info!("【全局快捷键/切换】工作台当前处于可见状态，执行隐藏退出...");
+                    let gen = sm.borrow().current_generation();
+                    let action = sm.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                    if matches!(action, SessionAction::Hide(_)) {
+                        overlay.hide();
+                        sm.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                        info!("【全局快捷键】工作台已成功隐藏。");
+                    }
+                } else {
+                    info!("【全局快捷键/切换】工作台当前处于隐藏状态，执行呼出呈现...");
+                    let action = sm.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+                    if let SessionAction::Reveal(gen) = action {
+                        overlay.reveal(gen);
+                        let commit_act = sm.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
+                        if matches!(commit_act, SessionAction::Hide(_)) {
+                            overlay.hide();
+                        }
+                        info!("【全局快捷键】工作台已成功呈现 [{}]。", gen);
+                    }
+                }
+                return;
+            }
+
+            info!("Vok GTK 应用激活初始化...");
+
+            // 0. 尝试自动注册 GNOME 桌面级全局快捷键 (F12)
+            vok_infra::desktop::DesktopShortcut::ensure_gnome_shortcut("F12");
+
+            // 0.1 初始化持久化 SQLite WAL 存储
             let storage = match StorageClient::open_default() {
                 Ok(s) => s,
                 Err(e) => {
@@ -39,7 +79,7 @@ impl VokApp {
                 }
             };
 
-            // 0.1 启动异步缩略图后台流水线
+            // 0.2 启动异步缩略图后台流水线
             let thumbnail_worker = match ThumbnailWorker::start() {
                 Ok(w) => Arc::new(w),
                 Err(e) => {
@@ -50,7 +90,7 @@ impl VokApp {
 
             // 1. 获取工作区几何（避让任务栏）
             let geom = WindowAdapter::get_work_area();
-            info!("初始化全屏遮罩窗口，避让尺寸: {}", geom);
+            info!("初始化全屏遮罩窗口，基准尺寸: {}", geom);
 
             // 2. 初始化核心会话状态机
             let state_machine = Rc::new(RefCell::new(SessionStateMachine::default()));
@@ -83,7 +123,6 @@ impl VokApp {
             }
 
             // 6. 建立后台按键事件通道与 GTK Main Loop 调度桥梁
-            // 遵循架构规范：后台线程阻塞监听，通过 async-channel + glib::spawn_future_local 原生无 sleep 唤醒 UI 线程
             let (async_tx, async_rx) = async_channel::unbounded::<HotkeyEvent>();
             let event_rx_clone = event_rx.clone();
 
@@ -116,6 +155,10 @@ impl VokApp {
                                 if matches!(commit_act, SessionAction::Hide(_)) {
                                     overlay_for_events.hide();
                                 }
+                            } else if let SessionAction::Hide(gen) = action {
+                                info!("【热键按下】Toggle 再次触发，隐藏工作台 {}", gen);
+                                overlay_for_events.hide();
+                                sm.handle_event(SessionEvent::Unmapped(gen));
                             }
                         }
                         vok_infra::input::KeyState::Released => {
@@ -130,6 +173,19 @@ impl VokApp {
                     }
                 }
             });
+
+            // 保存全局实例状态
+            *state_clone.borrow_mut() = Some(AppState {
+                overlay: overlay.clone(),
+                state_machine: state_machine.clone(),
+            });
+
+            // 首次启动自动呼出呈现
+            let initial_action = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+            if let SessionAction::Reveal(gen) = initial_action {
+                overlay.reveal(gen);
+                let _ = state_machine.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
+            }
 
             info!("Vok 事件路由与 GTK 主循环就绪。");
         });

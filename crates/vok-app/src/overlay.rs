@@ -36,14 +36,51 @@ impl OverlayWindow {
         storage: StorageClient,
         thumbnail_worker: Arc<ThumbnailWorker>,
     ) -> Self {
+        // 获取当前主显示器的逻辑几何尺寸与 HiDPI 缩放比
+        let (logical_width, logical_height) = if let Some(display) = gtk4::gdk::Display::default() {
+            let monitors = display.monitors();
+            if let Some(monitor) = monitors.item(0).and_downcast::<gtk4::gdk::Monitor>() {
+                let rect = monitor.geometry();
+                let scale = monitor.scale_factor();
+                info!(
+                    "检测到主显示器: 逻辑尺寸 {}x{}, 缩放比={}",
+                    rect.width(),
+                    rect.height(),
+                    scale
+                );
+                // 若 X11 物理尺寸大于逻辑尺寸且 scale > 1，进行换算
+                let w = if geom.width > rect.width() as u32 && scale > 1 {
+                    geom.width / scale as u32
+                } else if geom.width > 0 && geom.width <= rect.width() as u32 {
+                    geom.width
+                } else {
+                    rect.width() as u32
+                };
+                let h = if geom.height > rect.height() as u32 && scale > 1 {
+                    geom.height / scale as u32
+                } else if geom.height > 0 && geom.height <= rect.height() as u32 {
+                    geom.height
+                } else {
+                    rect.height() as u32
+                };
+                (w, h)
+            } else {
+                (geom.width, geom.height)
+            }
+        } else {
+            (geom.width, geom.height)
+        };
+
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Vok Overlay")
             .decorated(false)
-            .default_width(geom.width as i32)
-            .default_height(geom.height as i32)
+            .default_width(logical_width as i32)
+            .default_height(logical_height as i32)
             .build();
 
+        // 窗口最大化避让任务栏 (在 GNOME 下自动贴合工作区)
+        window.maximize();
         window.add_css_class("vok-window");
 
         // 1. 加载全局深色毛玻璃 CSS 主题
@@ -72,10 +109,9 @@ impl OverlayWindow {
         ));
         root_box.append(three_pane.widget());
 
-        // 5. 动态应用三栏宽度与卡片整除防截断高度
-        // 可用高度 = 屏幕总高 - Header预估高(64) - Footer(32) - 内外间距
-        let content_height = geom.height.saturating_sub(120);
-        let (pane_geom, card_geom) = three_pane.apply_geometry(geom.width, content_height);
+        // 5. 动态应用三栏宽度与卡片整除防截断高度 (基于逻辑像素计算)
+        let content_height = logical_height.saturating_sub(120);
+        let (pane_geom, card_geom) = three_pane.apply_geometry(logical_width, content_height);
         info!(
             "三栏几何已计算: 左={}px, 中={}px, 右={}px | 卡片整除行数={}, 单行高={}px (100%防截断)",
             pane_geom.left_width,
@@ -87,7 +123,10 @@ impl OverlayWindow {
 
         // 6. 底部状态与工作区提示
         let footer_label = Label::builder()
-            .label(format!("当前工作区: {} (已避让系统任务栏)", geom))
+            .label(format!(
+                "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: F12 呼出/关闭, Esc 退出",
+                logical_width, logical_height
+            ))
             .css_classes(["vok-footer"])
             .margin_top(4)
             .build();
@@ -95,12 +134,12 @@ impl OverlayWindow {
 
         window.set_child(Some(&root_box));
 
-        // 7. 注册 Esc 快捷键关闭
+        // 7. 注册 Esc / F12 快捷键关闭
         let key_controller = EventControllerKey::new();
         let on_dismiss_esc = on_dismiss.clone();
         key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, _state| {
-            if keyval == Key::Escape {
-                debug!("用户按下 Esc 键请求退出工作台");
+            if keyval == Key::Escape || keyval == Key::F12 {
+                debug!("用户按下 Esc/F12 键请求退出工作台");
                 if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
                     cb();
                 }
