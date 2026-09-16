@@ -200,16 +200,19 @@ impl WindowAdapter {
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
         let skip_taskbar = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?.reply()?.atom;
         let skip_pager = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")?.reply()?.atom;
+        let state_above = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom;
+        let stays_on_top = conn.intern_atom(false, b"_NET_WM_STATE_STAYS_ON_TOP")?.reply()?.atom;
         let net_wm_window_type = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom;
         let window_type_utility = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")?.reply()?.atom;
+        let net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
 
-        // 1. 直接修改窗口属性
+        // 1. 直接修改窗口属性：设置跳过任务栏与始终置顶
         conn.change_property32(
             PropMode::REPLACE,
             win,
             net_wm_state,
             AtomEnum::ATOM,
-            &[skip_taskbar, skip_pager],
+            &[skip_taskbar, skip_pager, state_above, stays_on_top],
         )?;
 
         conn.change_property32(
@@ -220,8 +223,27 @@ impl WindowAdapter {
             &[window_type_utility],
         )?;
 
-        // 2. 发送 ClientMessage 通知窗口管理器 (Mutter / KWin)
-        let event = ClientMessageEvent {
+        let event_mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+
+        // 2. 发送 ClientMessage 通知窗口管理器 (Mutter / KWin) 附加置顶状态
+        let event_above = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: win,
+            type_: net_wm_state,
+            data: ClientMessageData::from([
+                1, // _NET_WM_STATE_ADD
+                state_above,
+                stays_on_top,
+                1,
+                0,
+            ]),
+        };
+        conn.send_event(false, root, event_mask, event_above)?;
+
+        // 3. 发送 ClientMessage 通知窗口管理器附加跳过任务栏
+        let event_skip = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
             sequence: 0,
@@ -235,9 +257,29 @@ impl WindowAdapter {
                 0,
             ]),
         };
+        conn.send_event(false, root, event_mask, event_skip)?;
 
-        let event_mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
-        conn.send_event(false, root, event_mask, event)?;
+        // 4. 发送 _NET_ACTIVE_WINDOW 强制激活窗口并提升至最前台 (source indication = 2 绕过防焦点窃取)
+        let event_active = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: win,
+            type_: net_active_window,
+            data: ClientMessageData::from([
+                2, // 2: Pager / Taskbar / System Panel (优先级高于普通应用)
+                0, // CurrentTime
+                0,
+                0,
+                0,
+            ]),
+        };
+        conn.send_event(false, root, event_mask, event_active)?;
+
+        // 5. 硬件级提升窗口层级 (相当于 XRaiseWindow / StackMode::ABOVE)
+        use x11rb::protocol::xproto::{ConfigureWindowAux, StackMode};
+        conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
+
         conn.flush()?;
 
         Ok(())

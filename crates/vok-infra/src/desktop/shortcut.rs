@@ -26,8 +26,13 @@ impl DesktopShortcut {
             .args(["set", schema_prefix, "name", "Vok Workbench"])
             .output();
 
+        let trigger_cmd = format!(
+            "sh -c \"gdbus call --session --dest com.vok.desktop --object-path /com/vok/desktop --method org.gtk.Actions.Activate 'toggle' [] {{}} >/dev/null 2>&1 || {}\"",
+            exe_str
+        );
+
         let _ = Command::new("gsettings")
-            .args(["set", schema_prefix, "command", &exe_str])
+            .args(["set", schema_prefix, "command", &trigger_cmd])
             .output();
 
         let _ = Command::new("gsettings")

@@ -13,6 +13,32 @@ fn main() -> glib::ExitCode {
 
     info!("=== Vok (Linux) 效率工作台启动 ===");
 
+    // 0. 极速路径：若传入 --toggle，通过 D-Bus 毫秒级触发正在运行的常驻守护进程并立即退出
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--toggle" || a == "-t") {
+        let status = std::process::Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "com.vok.desktop",
+                "--object-path",
+                "/com/vok/desktop",
+                "--method",
+                "org.gtk.Actions.Activate",
+                "toggle",
+                "[]",
+                "{}",
+            ])
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                return glib::ExitCode::SUCCESS;
+            }
+        }
+    }
+
     // 默认在 X11 / XWayland 下运行，确保 EWMH 任务栏隐形与工作区避让 100% 生效
     if std::env::var("GDK_BACKEND").is_err() {
         std::env::set_var("GDK_BACKEND", "x11");

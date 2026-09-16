@@ -230,9 +230,17 @@ impl OverlayWindow {
     /// 呈现窗口并默认聚焦于顶部搜索框
     pub fn reveal(&self, gen: GenerationId) {
         self.header.set_status(&format!("会话中 [{gen}]"));
+        self.window.set_visible(true);
         self.window.present();
-        // 确保窗口跳过任务栏
+
+        // 1. 立即应用跳过任务栏与强制置顶
         vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
+
+        // 2. 在合成器完成首帧映射后再次强化置顶与焦点锁定 (双重保险，彻底杜绝被其他窗口遮挡)
+        glib::timeout_add_local_once(std::time::Duration::from_millis(20), move || {
+            vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
+        });
+
         // 呼出即入焦：自动聚焦于搜索框
         self.header.search_entry().grab_focus();
     }

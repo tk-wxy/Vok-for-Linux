@@ -54,7 +54,9 @@ impl VokApp {
                     }
                 } else {
                     info!("【全局快捷键/切换】工作台当前处于隐藏状态，执行呼出呈现...");
-                    let action = sm.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+                    let now = std::time::Instant::now();
+                    let action = sm.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
+                    let _ = sm.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
                     if let SessionAction::Reveal(gen) = action {
                         overlay.reveal(gen);
                         let commit_act = sm.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
@@ -209,7 +211,9 @@ impl VokApp {
                                     info!("【托盘操作】工作台已隐藏。");
                                 }
                             } else {
-                                let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+                                let now = std::time::Instant::now();
+                                let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
+                                let _ = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
                                 if let SessionAction::Reveal(gen) = action {
                                     overlay_for_tray.reveal(gen);
                                     let commit_act = sm_for_tray.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
@@ -227,6 +231,15 @@ impl VokApp {
                     }
                 }
             });
+
+            // 8.1 注册 D-Bus 原生 Action "toggle"，支持外部 0-延时瞬时唤起
+            let action_toggle = gtk4::gio::SimpleAction::new("toggle", None);
+            let tx_action = tx_toggle.clone();
+            action_toggle.connect_activate(move |_, _| {
+                info!("【D-Bus 极速唤起】收到系统快捷键/外部 Toggle 动作");
+                let _ = tx_action.send_blocking(TrayCommand::Toggle);
+            });
+            app.add_action(&action_toggle);
 
             let tray_handle = match vok_infra::VokTray::start(
                 move || {
@@ -252,7 +265,9 @@ impl VokApp {
             });
 
             // 首次启动自动呼出呈现
-            let initial_action = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+            let now = std::time::Instant::now();
+            let initial_action = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
+            let _ = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
             if let SessionAction::Reveal(gen) = initial_action {
                 overlay.reveal(gen);
                 let _ = state_machine.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
