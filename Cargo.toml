@@ -28,6 +28,8 @@ crossbeam-channel = "0.5"
 # Linux input & storage
 evdev = "0.12"
 rusqlite = { version = "0.31", features = ["bundled"] }
+zbus = "5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
 # GTK4 & UI stack
 gtk4 = { version = "0.9", features = ["v4_14"] }

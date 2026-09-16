@@ -6,9 +6,11 @@ use crossbeam_channel::Receiver;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::Application;
-use tracing::info;
+use tracing::{error, info};
 use vok_core::{SessionAction, SessionEvent, SessionStateMachine};
+use vok_infra::desktop::ThumbnailWorker;
 use vok_infra::input::HotkeyEvent;
+use vok_infra::storage::StorageClient;
 use vok_infra::window::WindowAdapter;
 
 use crate::overlay::OverlayWindow;
@@ -28,6 +30,24 @@ impl VokApp {
         app.connect_activate(move |app| {
             info!("Vok GTK 应用激活...");
 
+            // 0. 初始化持久化 SQLite WAL 存储
+            let storage = match StorageClient::open_default() {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("初始化持久化存储失败: {}", e);
+                    panic!("Fatal: 无法初始化 SQLite 存储: {}", e);
+                }
+            };
+
+            // 0.1 启动异步缩略图后台流水线
+            let thumbnail_worker = match ThumbnailWorker::start() {
+                Ok(w) => Arc::new(w),
+                Err(e) => {
+                    error!("启动缩略图流水线失败: {}", e);
+                    panic!("Fatal: 无法启动缩略图流水线: {}", e);
+                }
+            };
+
             // 1. 获取工作区几何（避让任务栏）
             let geom = WindowAdapter::get_work_area();
             info!("初始化全屏遮罩窗口，避让尺寸: {}", geom);
@@ -36,7 +56,7 @@ impl VokApp {
             let state_machine = Rc::new(RefCell::new(SessionStateMachine::default()));
 
             // 3. 构建全屏遮罩窗口
-            let overlay = Rc::new(OverlayWindow::new(app, geom));
+            let overlay = Rc::new(OverlayWindow::new(app, geom, storage, thumbnail_worker));
 
             // 4. 绑定窗口 Esc / 点击外部关闭行为到状态机
             {

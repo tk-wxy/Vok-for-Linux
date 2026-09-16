@@ -101,7 +101,7 @@ impl EvdevMonitor {
                     }
                     debug!("停止监听物理设备: {:?}", path);
                 })
-                .map_err(|e| InputError::Io(e))?;
+                .map_err(InputError::Io)?;
 
             worker_threads.push(handle);
         }
@@ -177,6 +177,12 @@ impl EvdevMonitor {
 pub struct MockInputMonitor {
     tx: Sender<HotkeyEvent>,
     rx: Receiver<HotkeyEvent>,
+}
+
+impl Default for MockInputMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockInputMonitor {

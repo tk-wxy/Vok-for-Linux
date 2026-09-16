@@ -1,30 +1,41 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use gtk4::gdk::{self, DragAction, FileList, Key};
+use gtk4::gdk::Key;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, DropTarget, EventControllerKey,
-    GestureClick, Label, Orientation,
+    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label,
+    Orientation,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use vok_core::generation::GenerationId;
+use vok_infra::desktop::ThumbnailWorker;
+use vok_infra::storage::StorageClient;
 use vok_infra::window::WorkAreaGeometry;
 
+use crate::ui::{apply_theme, HeaderComponent, ThreePaneContainer};
+
+type DismissCallback = Box<dyn Fn()>;
+
+/// 全屏半透明工作台主窗口
 pub struct OverlayWindow {
     window: ApplicationWindow,
-    status_label: Label,
-    #[allow(dead_code)]
-    dropped_files_label: Label,
-    on_dismiss: Rc<RefCell<Option<Box<dyn Fn()>>>>,
-    on_drop: Rc<RefCell<Option<Box<dyn Fn(Vec<PathBuf>)>>>>,
+    header: Rc<HeaderComponent>,
+    three_pane: Rc<ThreePaneContainer>,
+    on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
 }
 
 impl OverlayWindow {
-    /// 构建全屏避让任务栏的半透明遮罩窗口
-    pub fn new(app: &Application, geom: WorkAreaGeometry) -> Self {
+    /// 构建全屏避让任务栏的三栏工作台主窗口
+    pub fn new(
+        app: &Application,
+        geom: WorkAreaGeometry,
+        storage: StorageClient,
+        thumbnail_worker: Arc<ThumbnailWorker>,
+    ) -> Self {
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Vok Overlay")
@@ -33,124 +44,63 @@ impl OverlayWindow {
             .default_height(geom.height as i32)
             .build();
 
-        // 绑定 CSS 样式
-        Self::apply_styles(&window);
+        window.add_css_class("vok-window");
 
-        // 主容器
+        // 1. 加载全局深色毛玻璃 CSS 主题
+        apply_theme();
+
+        // 2. 根纵向容器
         let root_box = GtkBox::builder()
             .orientation(Orientation::Vertical)
             .css_classes(["vok-root-container"])
             .hexpand(true)
             .vexpand(true)
-            .build();
-
-        // 顶部信息条
-        let header_box = GtkBox::builder()
-            .orientation(Orientation::Horizontal)
-            .css_classes(["vok-header"])
             .spacing(12)
-            .margin_top(24)
-            .margin_start(32)
-            .margin_end(32)
             .build();
 
-        let title_label = Label::builder()
-            .label("VOK 工作台")
-            .css_classes(["vok-title"])
-            .halign(Align::Start)
-            .build();
+        // 3. 顶部 Header 区 (Logo + 全局搜索框 + 设置按钮)
+        let header = Rc::new(HeaderComponent::new());
+        root_box.append(header.widget());
 
-        let status_label = Label::builder()
-            .label("就绪 - [Esc] 或点击外部退出")
-            .css_classes(["vok-status"])
-            .halign(Align::End)
-            .hexpand(true)
-            .build();
+        let on_dismiss: Rc<RefCell<Option<DismissCallback>>> = Rc::new(RefCell::new(None));
 
-        header_box.append(&title_label);
-        header_box.append(&status_label);
-        root_box.append(&header_box);
+        // 4. 水平 1:2:1 三栏 (启动台 25% : 中转站 50% : 剪贴板 25%)
+        let three_pane = Rc::new(ThreePaneContainer::new(
+            storage,
+            thumbnail_worker,
+            on_dismiss.clone(),
+        ));
+        root_box.append(three_pane.widget());
 
-        // 中间拖拽投递区域 (Drop Target Area / Stage 货架原型)
-        let drop_zone = GtkBox::builder()
-            .orientation(Orientation::Vertical)
-            .css_classes(["vok-drop-zone"])
-            .halign(Align::Center)
-            .valign(Align::Center)
-            .hexpand(true)
-            .vexpand(true)
-            .spacing(16)
-            .build();
+        // 5. 动态应用三栏宽度与卡片整除防截断高度
+        // 可用高度 = 屏幕总高 - Header预估高(64) - Footer(32) - 内外间距
+        let content_height = geom.height.saturating_sub(120);
+        let (pane_geom, card_geom) = three_pane.apply_geometry(geom.width, content_height);
+        info!(
+            "三栏几何已计算: 左={}px, 中={}px, 右={}px | 卡片整除行数={}, 单行高={}px (100%防截断)",
+            pane_geom.left_width,
+            pane_geom.middle_width,
+            pane_geom.right_width,
+            card_geom.row_count,
+            card_geom.row_height
+        );
 
-        let drop_icon_label = Label::builder()
-            .label("📥")
-            .css_classes(["vok-drop-icon"])
-            .build();
-
-        let drop_hint_label = Label::builder()
-            .label("在外部文件管理器抓取文件 -> 在此释放即可入站中转")
-            .css_classes(["vok-drop-hint"])
-            .build();
-
-        let dropped_files_label = Label::builder()
-            .label("暂无文件入站")
-            .css_classes(["vok-dropped-files"])
-            .build();
-
-        drop_zone.append(&drop_icon_label);
-        drop_zone.append(&drop_hint_label);
-        drop_zone.append(&dropped_files_label);
-        root_box.append(&drop_zone);
-
-        // 底部提示
+        // 6. 底部状态与工作区提示
         let footer_label = Label::builder()
-            .label(format!("当前工作区几何: {} (已避让系统任务栏)", geom))
+            .label(format!("当前工作区: {} (已避让系统任务栏)", geom))
             .css_classes(["vok-footer"])
-            .margin_bottom(16)
+            .margin_top(4)
             .build();
         root_box.append(&footer_label);
 
         window.set_child(Some(&root_box));
 
-        let on_dismiss: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-        let on_drop: Rc<RefCell<Option<Box<dyn Fn(Vec<PathBuf>)>>>> = Rc::new(RefCell::new(None));
-
-        // 1. 注册拖拽丢入目标 GtkDropTarget
-        let drop_target = DropTarget::new(FileList::static_type(), DragAction::COPY);
-        let on_drop_cb = on_drop.clone();
-        let dropped_label_clone = dropped_files_label.clone();
-        drop_target.connect_drop(move |_target, value, _x, _y| {
-            if let Ok(file_list) = value.get::<FileList>() {
-                let mut paths = Vec::new();
-                for file in file_list.files() {
-                    if let Some(path) = file.path() {
-                        paths.push(path);
-                    }
-                }
-                info!("【外部拖入入站成功】捕获到 {} 个文件: {:?}", paths.len(), paths);
-                dropped_label_clone.set_label(&format!(
-                    "最新入站: {} (共 {} 项)",
-                    paths.first().map(|p| p.display().to_string()).unwrap_or_default(),
-                    paths.len()
-                ));
-
-                if let Some(cb) = on_drop_cb.borrow().as_ref() {
-                    cb(paths);
-                }
-                true
-            } else {
-                warn!("收到未知格式拖放数据");
-                false
-            }
-        });
-        window.add_controller(drop_target);
-
-        // 2. 注册 Esc 快捷键控制器
+        // 7. 注册 Esc 快捷键关闭
         let key_controller = EventControllerKey::new();
         let on_dismiss_esc = on_dismiss.clone();
         key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, _state| {
             if keyval == Key::Escape {
-                debug!("用户在工作台按下 Esc 键");
+                debug!("用户按下 Esc 键请求退出工作台");
                 if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
                     cb();
                 }
@@ -161,11 +111,11 @@ impl OverlayWindow {
         });
         window.add_controller(key_controller);
 
-        // 3. 点击背景空白处关闭
+        // 8. 点击背景空白处关闭
         let click_gesture = GestureClick::new();
         let on_dismiss_click = on_dismiss.clone();
         click_gesture.connect_released(move |_gesture, _n_press, _x, _y| {
-            debug!("用户点击工作台空白背景");
+            debug!("用户点击工作台空白背景请求关闭");
             if let Some(cb) = on_dismiss_click.borrow().as_ref() {
                 cb();
             }
@@ -174,27 +124,28 @@ impl OverlayWindow {
 
         Self {
             window,
-            status_label,
-            dropped_files_label,
+            header,
+            three_pane,
             on_dismiss,
-            on_drop,
         }
     }
 
-    /// 设置关闭回调
+    /// 设置工作台关闭回调 (Esc / 点击空白处)
     pub fn set_on_dismiss<F: Fn() + 'static>(&self, callback: F) {
         *self.on_dismiss.borrow_mut() = Some(Box::new(callback));
     }
 
-    /// 设置拖入完成回调
+    /// 设置中转站外部拖拽丢入完成回调
     pub fn set_on_drop<F: Fn(Vec<PathBuf>) + 'static>(&self, callback: F) {
-        *self.on_drop.borrow_mut() = Some(Box::new(callback));
+        self.three_pane.set_on_drop(callback);
     }
 
-    /// 呈现窗口
+    /// 呈现窗口并默认聚焦于顶部搜索框
     pub fn reveal(&self, gen: GenerationId) {
-        self.status_label.set_label(&format!("会话中 [{gen}]"));
+        self.header.set_status(&format!("会话中 [{gen}]"));
         self.window.present();
+        // 呼出即入焦：自动聚焦于搜索框
+        self.header.search_entry().grab_focus();
     }
 
     /// 隐藏窗口
@@ -202,72 +153,9 @@ impl OverlayWindow {
         self.window.set_visible(false);
     }
 
-    /// 是否可见
+    /// 是否处于可见状态
     #[allow(dead_code)]
     pub fn is_visible(&self) -> bool {
         self.window.is_visible()
-    }
-
-    /// 应用现代深色毛玻璃 CSS 样式
-    fn apply_styles(window: &ApplicationWindow) {
-        let provider = gtk4::CssProvider::new();
-        provider.load_from_string(
-            "
-            window {
-                background-color: transparent;
-            }
-            .vok-root-container {
-                background-color: rgba(18, 20, 28, 0.88);
-                border: 1px solid rgba(255, 255, 255, 0.1);
-            }
-            .vok-title {
-                color: #ffffff;
-                font-size: 20px;
-                font-weight: bold;
-                letter-spacing: 1px;
-            }
-            .vok-status {
-                color: #9aa0a6;
-                font-size: 13px;
-            }
-            .vok-drop-zone {
-                min-width: 500px;
-                min-height: 280px;
-                background-color: rgba(255, 255, 255, 0.04);
-                border: 2px dashed rgba(255, 255, 255, 0.25);
-                border-radius: 20px;
-                padding: 32px;
-            }
-            .vok-drop-zone:hover {
-                background-color: rgba(255, 255, 255, 0.08);
-                border-color: #4da3ff;
-            }
-            .vok-drop-icon {
-                font-size: 48px;
-            }
-            .vok-drop-hint {
-                color: #e8eaed;
-                font-size: 16px;
-                font-weight: 500;
-            }
-            .vok-dropped-files {
-                color: #8ab4f8;
-                font-size: 14px;
-            }
-            .vok-footer {
-                color: #5f6368;
-                font-size: 12px;
-            }
-            ",
-        );
-
-        if let Some(display) = gdk::Display::default() {
-            gtk4::style_context_add_provider_for_display(
-                &display,
-                &provider,
-                gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-            );
-        }
-        window.add_css_class("vok-window");
     }
 }

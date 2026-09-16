@@ -1,13 +1,9 @@
-mod app;
-mod overlay;
-
 use evdev::Key;
 use gtk4::glib;
 use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+use vok_app::app::VokApp;
 use vok_infra::input::{EvdevMonitor, MockInputMonitor};
-
-use crate::app::VokApp;
 
 fn main() -> glib::ExitCode {
     let subscriber = FmtSubscriber::builder()
@@ -15,7 +11,7 @@ fn main() -> glib::ExitCode {
         .finish();
     tracing::subscriber::set_global_default(subscriber).expect("设置默认日志器失败");
 
-    info!("=== Vok (Linux) M0 宿主内核原型启动 ===");
+    info!("=== Vok (Linux) 效率工作台启动 ===");
 
     // 尝试启动基于 Linux 内核 evdev 的物理按键监听 (以 KEY_SPACE 或 KEY_F12 为例)
     let (event_rx, _evdev_handle, _mock_handle) = match EvdevMonitor::start(Key::KEY_F12) {
@@ -35,6 +31,21 @@ fn main() -> glib::ExitCode {
                 std::thread::sleep(std::time::Duration::from_millis(1500));
                 info!("【仿真触发】模拟按下呼出快捷键...");
                 mock_tx.simulate_press(88); // F12 keycode
+            });
+
+            let mock_tx_stdin = mock.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let stdin = std::io::stdin();
+                info!("【人工测试提示】终端按回车键 (Enter) 即可随时再次呼出 Vok 工作台，输入 q 退出");
+                for line in stdin.lock().lines().flatten() {
+                    let cmd = line.trim();
+                    if cmd == "q" || cmd == "quit" {
+                        std::process::exit(0);
+                    }
+                    info!("【终端触发】模拟呼出快捷键 (F12)...");
+                    mock_tx_stdin.simulate_press(88);
+                }
             });
 
             (rx, None, Some(mock))

@@ -12,5 +12,8 @@ thiserror.workspace = true
 crossbeam-channel.workspace = true
 evdev = "0.12"
 x11rb = "0.14"
+rusqlite.workspace = true
+zbus.workspace = true
+image.workspace = true
 
 [dev-dependencies]
