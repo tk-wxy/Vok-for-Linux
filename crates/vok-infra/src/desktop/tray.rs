@@ -85,7 +85,7 @@ impl VokTray {
             on_toggle: Arc::new(on_toggle),
             on_quit: Arc::new(on_quit),
         };
-        let handle = tray.spawn()?;
+        let handle = tray.assume_sni_available(true).spawn()?;
         info!("【系统托盘就绪】StatusNotifierItem 托盘图标已注册到系统通知区域");
         Ok(TrayHandle { handle })
     }
