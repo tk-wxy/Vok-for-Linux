@@ -116,6 +116,11 @@ impl OverlayWindow {
         // window.maximize();
         window.add_css_class("vok-window");
 
+        // 绑定 map 信号：在窗口映射时自动注入 SKIP_TASKBAR 和 UTILITY 属性
+        window.connect_map(|_| {
+            vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
+        });
+
         // 1. 加载全局深色毛玻璃 CSS 主题
         apply_theme();
 
@@ -226,6 +231,8 @@ impl OverlayWindow {
     pub fn reveal(&self, gen: GenerationId) {
         self.header.set_status(&format!("会话中 [{gen}]"));
         self.window.present();
+        // 确保窗口跳过任务栏
+        vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
         // 呼出即入焦：自动聚焦于搜索框
         self.header.search_entry().grab_focus();
     }

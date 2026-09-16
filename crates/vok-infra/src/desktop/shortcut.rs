@@ -73,6 +73,36 @@ impl DesktopShortcut {
         );
         true
     }
+
+    /// 确保在 XDG 应用程序目录注册具有 NoDisplay=true 的 Desktop Entry
+    /// 使 GNOME Shell / Ubuntu Dock 识别为静默后台应用，避免在 Dock 中显示
+    pub fn ensure_desktop_entry() -> bool {
+        let home = match std::env::var("HOME") {
+            Ok(h) => h,
+            Err(_) => return false,
+        };
+        let app_dir = std::path::PathBuf::from(home).join(".local/share/applications");
+        if let Err(e) = std::fs::create_dir_all(&app_dir) {
+            tracing::warn!("无法创建 applications 目录: {:?}", e);
+            return false;
+        }
+
+        let exe_path = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        let desktop_file = app_dir.join("com.vok.desktop.desktop");
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=Vok\nComment=Linux 原生全屏沉浸式工作台\nExec={}\nIcon=view-grid-symbolic\nTerminal=false\nCategories=Utility;\nNoDisplay=true\n",
+            exe_path.to_string_lossy()
+        );
+
+        let _ = std::fs::write(&desktop_file, content);
+        let _ = Command::new("update-desktop-database").arg(&app_dir).output();
+        info!("【静默桌面配置就绪】已安装 com.vok.desktop (NoDisplay=true)");
+        true
+    }
 }
 
 #[cfg(test)]

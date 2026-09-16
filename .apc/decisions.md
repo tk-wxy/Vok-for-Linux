@@ -13,6 +13,7 @@
 - §7 **主界面 1:2:1 三栏架构、防截断高度算法与虚拟滚动** — 启动台/中转站/剪贴板横向分布，卡片高度整除规避 UI 截断，GTK4 视口回收支撑海量条目极低内存。
 - §8 **双向焦点生命周期与原前台失焦精准返还** — 呼出聚焦搜索框，关闭原子返还原应用输入框，失焦/Esc/快捷键安全关闭。
 - §9 **Workbench-APP 定位规范：功能交互范本与技术架构反面教材** — 继承三栏与拖拽交互精髓，彻底摒弃 Web/Tauri/IPC 膨胀与 sleep 补丁代码。
+- §10 **幽灵 HUD 覆盖层、任务栏彻底隐形 (Skip Taskbar) 与 StatusNotifierItem (SNI) 托盘常驻** — 杜绝 Ubuntu Dock 污染，实现纯净后台常驻与 HUD 瞬时显隐。
 
 ---
 
@@ -131,3 +132,22 @@
   - **代码隔离禁令**：坚决禁止将 Workbench-APP 的 Web 前端代码、Tauri IPC 管道和基于 `sleep` 的时序逻辑移植到本项目；
   - **原生重构**：所有交互必须基于纯 Rust 单进程、Linux 内核接口与 GTK4 原生渲染重新实现。
 - **状态**：Active（2026-09-12 确立）。
+
+---
+
+### §10 幽灵 HUD 覆盖层、任务栏彻底隐形 (Skip Taskbar) 与 StatusNotifierItem (SNI) 托盘常驻
+
+- **背景与痛点**：
+  在 Windows 版 Vok 中，工作台以 ToolWindow 呈现，不占任务栏、呼出无感，仅在系统托盘静默常驻。而在 Linux (GNOME/Ubuntu) 默认环境下，普通应用顶级窗口（`xdg-toplevel`）在呼出时，Ubuntu Dock 会自动在左侧点亮图标、显示运行小白点并伴随动效，破坏了“全屏沉浸式 HUD 第二桌面”的产品纯净质感。
+- **最终方案**：
+  1. **EWMH 任务栏隐形属性注入**：
+     - 默认在 X11 / XWayland 下运行，窗口映射时通过 `x11rb` 直接注入 `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_STATE_SKIP_PAGER`；
+     - 窗口类型设置为 `_NET_WM_WINDOW_TYPE_UTILITY`；
+     - Ubuntu Dock 与 GNOME Shell 过滤该窗口（`skip_taskbar == true`），彻底不在左侧任务栏产生任何图标或运行指示灯；
+  2. **静默 Desktop Entry**：
+     - 在 `~/.local/share/applications/com.vok.desktop.desktop` 写入 `NoDisplay=true`，避免在系统常规应用列表中被当作普通应用调度；
+  3. **StatusNotifierItem (SNI) 托盘常驻与守护**：
+     - 接入 D-Bus `StatusNotifierItem` 规范，在顶部状态栏常驻 `view-grid-symbolic` 图标；
+     - 窗口内按 Esc / 点击空白处仅调用 `hide()`，配合 `gio::ApplicationHoldGuard` 维持后台极低开销守护（< 5MB）；
+     - 支持托盘左键 Toggle 呼出/隐藏，右键菜单提供【呼出工作台】与【退出 Vok】。
+- **状态**：Active（2026-09-16 确立）。

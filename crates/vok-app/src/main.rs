@@ -13,7 +13,10 @@ fn main() -> glib::ExitCode {
 
     info!("=== Vok (Linux) 效率工作台启动 ===");
 
-    // 尝试启动基于 Linux 内核 evdev 的物理按键监听 (以 KEY_SPACE 或 KEY_F12 为例)
+    // 默认在 X11 / XWayland 下运行，确保 EWMH 任务栏隐形与工作区避让 100% 生效
+    if std::env::var("GDK_BACKEND").is_err() {
+        std::env::set_var("GDK_BACKEND", "x11");
+    }
     let (event_rx, _evdev_handle, _mock_handle) = match EvdevMonitor::start(Key::KEY_F12) {
         Ok(monitor) => {
             info!("【硬件按键监听已就绪】成功独占监听 /dev/input 物理 F12 按键");

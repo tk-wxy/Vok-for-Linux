@@ -6,7 +6,7 @@ use crossbeam_channel::Receiver;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::Application;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use vok_core::{SessionAction, SessionEvent, SessionStateMachine};
 use vok_infra::desktop::ThumbnailWorker;
 use vok_infra::input::HotkeyEvent;
@@ -18,6 +18,8 @@ use crate::overlay::OverlayWindow;
 struct AppState {
     overlay: Rc<OverlayWindow>,
     state_machine: Rc<RefCell<SessionStateMachine>>,
+    _tray: Option<vok_infra::TrayHandle>,
+    _hold_guard: gtk4::gio::ApplicationHoldGuard,
 }
 
 pub struct VokApp {
@@ -67,8 +69,12 @@ impl VokApp {
 
             info!("Vok GTK 应用激活初始化...");
 
-            // 0. 尝试自动注册 GNOME 桌面级全局快捷键 (F12)
+            // 0. 尝试自动注册 GNOME 桌面级全局快捷键 (F12) 与静默桌面 Entry (NoDisplay)
             vok_infra::desktop::DesktopShortcut::ensure_gnome_shortcut("F12");
+            vok_infra::desktop::DesktopShortcut::ensure_desktop_entry();
+
+            // 保持 GTK 守护进程在所有窗口隐藏时不退出
+            let hold_guard = app.hold();
 
             // 0.1 初始化持久化 SQLite WAL 存储
             let storage = match StorageClient::open_default() {
@@ -174,10 +180,75 @@ impl VokApp {
                 }
             });
 
+            // 8. 启动系统托盘常驻守护服务 (StatusNotifierItem)
+            #[derive(Debug, Clone, Copy)]
+            enum TrayCommand {
+                Toggle,
+                Quit,
+            }
+
+            let (tray_tx, tray_rx) = async_channel::unbounded::<TrayCommand>();
+            let tx_toggle = tray_tx.clone();
+            let tx_quit = tray_tx;
+
+            let overlay_for_tray = overlay.clone();
+            let sm_for_tray = state_machine.clone();
+            let app_for_tray = app.clone();
+
+            glib::spawn_future_local(async move {
+                while let Ok(cmd) = tray_rx.recv().await {
+                    match cmd {
+                        TrayCommand::Toggle => {
+                            let is_visible = overlay_for_tray.is_visible();
+                            if is_visible {
+                                let gen = sm_for_tray.borrow().current_generation();
+                                let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                                if matches!(action, SessionAction::Hide(_)) {
+                                    overlay_for_tray.hide();
+                                    sm_for_tray.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                                    info!("【托盘操作】工作台已隐藏。");
+                                }
+                            } else {
+                                let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalPress(std::time::Instant::now()));
+                                if let SessionAction::Reveal(gen) = action {
+                                    overlay_for_tray.reveal(gen);
+                                    let commit_act = sm_for_tray.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
+                                    if matches!(commit_act, SessionAction::Hide(_)) {
+                                        overlay_for_tray.hide();
+                                    }
+                                    info!("【托盘操作】工作台已呈现 [{}]。", gen);
+                                }
+                            }
+                        }
+                        TrayCommand::Quit => {
+                            info!("【托盘退出】正在优雅终止 Vok 应用...");
+                            app_for_tray.quit();
+                        }
+                    }
+                }
+            });
+
+            let tray_handle = match vok_infra::VokTray::start(
+                move || {
+                    let _ = tx_toggle.send_blocking(TrayCommand::Toggle);
+                },
+                move || {
+                    let _ = tx_quit.send_blocking(TrayCommand::Quit);
+                },
+            ) {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    warn!("启动系统托盘服务失败: {}", e);
+                    None
+                }
+            };
+
             // 保存全局实例状态
             *state_clone.borrow_mut() = Some(AppState {
                 overlay: overlay.clone(),
                 state_machine: state_machine.clone(),
+                _tray: tray_handle,
+                _hold_guard: hold_guard,
             });
 
             // 首次启动自动呼出呈现
