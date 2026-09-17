@@ -19,6 +19,7 @@
 - §13 **快捷键领域契约 (HotkeyConfig)、GSettings 系统通道动态热重载与可视化录入控件 (HotkeyRecorder)** — 解耦硬编码 F12，免重启实时生效，录入交互安全拦截。
 - §14 **GNOME Mutter 窗口类型 (NORMAL vs UTILITY) 约束与最大化首帧贴合规范 (Zero-Twitch Geometry Policy)** — 根治缩放抽搐与全屏未覆盖 bug，原生最大化首帧贴合。
 - §15 **GNOME Mutter 动效机制与无抖动纯净映射规范 (Zero-Jitter Pure Mapping Policy)** — 根治 0.01 缩放抽搐与 20ms 二次重排抖动，实现 4.7ms 极速稳定呼出。
+- §16 **EWMH 双向前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out) 与窗口防窃取绕行规范** — 呼出前毫秒级读取活动 XID，关闭原子交还焦点，点击外部平滑自动退让。
 
 ---
 
@@ -264,5 +265,26 @@
   3. **恢复 GNOME 桌面环境原生平滑渲染管线**：
      - 废弃强行篡改全局 `org.gnome.desktop.interface enable-animations` 的侵入式方案，避免触发 GNOME Shell 的 0.01 帧渲染缺陷，维持系统与窗口自然平滑的高帧率呈现；
      - 保留 GTK 4 应用内部组件级动画禁用 (`set_gtk_enable_animations(false)`)，消除组件自身内部状态延迟。
+- **状态**：Active（2026-09-17 确立）。
+
+---
+
+### §16 EWMH 双向前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out) 与窗口防窃取绕行规范
+
+- **背景与痛点**：
+  1. 工作台此前呼出后虽能正确抢占焦点至搜索框，但在退出后（按 Esc、再次按快捷键或点击空白处），原前台编辑窗口（如 VSCode、终端、浏览器输入框）无法自动恢复活动输入状态，用户必须手动再点一次鼠标，工作流严重受阻；
+  2. 工作台此前缺少真正的“失焦自动退出”：用户点击任务栏或多屏其他窗口时，工作台依然常驻不退，破坏了“用完即走”的 HUD 质感；
+  3. 无法支撑即将到来的 M2 切片 2.2“一键直接粘贴”：直接粘贴要求必须将物理焦点精准归还原窗口后方可执行虚拟击键。
+- **最终方案**：
+  1. **EWMH _NET_ACTIVE_WINDOW 双向前台暂存与恢复**：
+     - 在 `OverlayWindow::reveal()` 呼出前瞬间，调用 `WindowAdapter::get_active_window_id()` 读取当前 Root 窗口的 `_NET_ACTIVE_WINDOW`；
+     - 校验非自身窗口（排除 `"Vok Overlay"`）后暂存为 `previous_active_window`；
+     - 在 `OverlayWindow::hide()` 隐藏时，无条件通过 `ClientMessageEvent` 发送 `_NET_ACTIVE_WINDOW`，采用 `source indication = 2 (Pager/Panel)` 绕过 Mutter 的防焦点窃取（Focus Stealing Prevention），实现原子无缝焦点归还；
+  2. **弱引用失焦自动退出 (Focus-Out Auto-Close)**：
+     - 挂载 `window.connect_is_active_notify` 监听窗口顶级激活状态；
+     - 引入 `has_been_active` 状态守卫，严格要求经历过 `active == true -> active == false` 且当前窗口仍处于 `is_visible()` 时方才触发，彻底杜绝映射首帧阶段的误触发；
+     - 经确认，窗口内 Popover（设置面板、卡片右键菜单）由于共享同一 GdkSurface，操作时不会导致 `is_active` 翻转，避免了内部操作被误退出的缺陷；
+  3. **单元测试与门禁固化**：
+     - 建立 `tests/m2_gate_test.rs`，验证焦点暂存/恢复调用容错、非法 XID (0) 安全 No-Op，以及 `SessionEvent::FocusLost` 的代次隔离保护。
 - **状态**：Active（2026-09-17 确立）。
 

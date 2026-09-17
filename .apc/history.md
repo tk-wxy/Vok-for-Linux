@@ -47,4 +47,9 @@
 - 接入 `ksni` (SNI) 规范，系统顶部通知栏常驻 `view-grid-symbolic` 图标，支持左键 Toggle 与右键上下文菜单；
 - `gio::ApplicationHoldGuard` 确保窗口隐藏时后台守护不退出（常驻内存 `< 5MB`）。
 
+### Session 2026-09-17 - 落地切片 S3：可视化快捷键自定义与录入交互组件 (HotkeyRecorder)
 
+- 彻底解耦硬编码 `F12` 快捷键，落地 `vok-core` 纯领域模型，支持 `Super + Space`、`Alt + Space`、`Ctrl + ~` 等任意标准组合；
+- SQLite WAL 新增 `app_settings` 表，单写者串行持久化用户专属配置；
+- GNOME `custom-keybinding` 动态热更新，修改即刻生效无需重启进程；
+- 封装 `HotkeyRecorder` 交互组件与 `SettingsPopover` 浮层面板，主窗口内 Toggle 按键比对与底部 Footer 状态文本实时联动同步。

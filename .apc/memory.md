@@ -10,20 +10,25 @@
 
 ## §0 快照
 
-- **Status**: 根治“界面抽搐抖动”缺陷，查明 GNOME Shell 0.01 帧渲染缺陷与 GTK4 重新呼出未显式最大化导致与 Mutter 状态争夺的根因，确立无抖动纯净映射规范。
+- **Status**: 落地 Milestone M2 切片 2.1（原前台活动窗口暂存与原子精准返还引擎、弱引用失焦自动退出 Focus-Out Auto-Close），实测 100% 恢复前台 Chrome 焦点，建立 M2 自动化门禁测试套件。
 - **Latest progress**: 
-  1. **抽搐抖动两大根因定位**：
-     - 当设置 `enable-animations = false` 时，GNOME Shell `windowManager.js` 的 `_mapWindow` 仍无条件执行 `scale_x = 0.01; scale_y = 0.05` 并 `await`，导致 Clutter 在第 1 帧将全屏窗口渲染为一个 1% 宽的微小斑点，第 2 帧瞬间弹爆全屏，肉眼可见剧烈痉挛；
-     - 在 GTK4 中，窗口隐藏（`set_visible(false)`）会导致底层 `GdkSurface` 销毁并重置 `is_maximized=false`。若重新呼出（`reveal()`）未显式调用 `window.maximize()`，GTK 会默认以未最大化尺寸向合成器呈现，而 X11 层又试图设置最大化，引发 GTK 与 Mutter 来回拉扯震荡（4 轮反复翻转），导致窗口骤缩为 2972x1452 并引发抽搐；
-  2. **彻底根治与纯净映射**：
-     - 废弃全局篡改 `enable-animations` 的方案，恢复 GNOME 原生平滑高帧率渲染管线；
-     - 在 `OverlayWindow::reveal()` 呼出时无条件显式执行 `self.window.maximize()`，从构建首帧起锁定最大化，彻底杜绝 GTK 与 Mutter 的状态拉扯；
-     - `set_skip_taskbar` 完整固化 `MAXIMIZED_HORZ/VERT`、`SKIP_TASKBAR`、`ABOVE`，删除 20ms 延时定时器，实机呼出耗时保持 **4.7ms**；
-  3. **实测性能验证**：连续多次快速 Toggle 呼出与隐藏，`xwininfo` 四角数据持续锁定 `Corners: +132+64 -0+64 -0-0 +132-0` 绝对平齐，Release 守护进程（task-1211）在后台持续稳定运行。
-- **Next step**: 用户实机体验验证呼出平稳无抖动；推进 Milestone M2（原前台失焦精准返还、`/dev/uinput` 硬件直接粘贴、透明代理拖出外部）。
-- **Known issues**: 无。全屏严丝合缝、4.7ms 极速快捷键唤醒、免重启热录入已全面达到工业级平稳。
+  1. 确立并落盘 `docs/m2_planning.md`，拆解 M2 四大纵向切片与 GATE-M2-1~6 量化门禁矩阵；
+  2. `vok-infra::window` 增补 `get_active_window_id()`、`restore_active_window()` 与 `get_window_title()`，采用 EWMH `_NET_ACTIVE_WINDOW (source=2)` 绕行 Mutter 防焦点窃取；
+  3. `OverlayWindow` 落地呼出前活动窗口暂存、退出原子焦点归还，以及基于 `window.connect_is_active_notify` + `has_been_active` 状态守卫的失焦平滑自动关闭；
+  4. 实机实测：Release 后台进程呼出捕获 `[0x400004] (MC100 Server - Google Chrome)`，隐藏瞬间精准交还焦点，`xprop -root _NET_ACTIVE_WINDOW` 权威复核为 `0x400004`；
+  5. 落地 `tests/m2_gate_test.rs`，全量 56 项测试 100% 稳健通过。
+- **Next step**: 推进 Milestone M2 切片 2.2（基于 Linux 内核 `/dev/uinput` 的硬件级直接粘贴与权限降级保护）。
+- **Known issues**: 无。双向焦点无缝返还，失焦自动退出安全无抖动。
 
 ## §0A 最近会话
+
+### Session 2026-09-17 - 落地 M2 切片 2.1：前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out)
+
+- **核心闭环**：
+  1. 确立并落盘 `docs/m2_planning.md` 整体技术方案；
+  2. `vok-infra::window` 封装 X11/EWMH `_NET_ACTIVE_WINDOW` 查询与恢复接口，单测覆盖非法 XID 容错；
+  3. `OverlayWindow` 呼出时智能识别排除自身并暂存前台 XID，`hide()` 时原子触发恢复请求；
+  4. 挂载激活状态通知，设计 `has_been_active` 状态守卫排除映射首帧伪失焦，实机 Toggle 与 xprop 验证焦点 100% 精准归还原应用。
 
 ### Session 2026-09-17 - 根治“界面抽搐抖动”，确立 Zero-Jitter 无抖动纯净映射规范
 
@@ -39,14 +44,6 @@
   2. 启用 GTK 原生 `window.maximize()` 首帧贴合，彻底消除居中留白与短暂未覆盖 bug；
   3. `set_skip_taskbar` 移除多余坐标操作，仅保留纯净 `StackMode::ABOVE`；
   4. 弱引用可见性防抖守卫与 GSettings 幂等性过滤，实测 `Corners: +132+64 -0+64 -0-0 +132-0` 零缝隙贴合。
-
-### Session 2026-09-17 - 落地切片 S3：可视化快捷键自定义与录入交互组件 (HotkeyRecorder)
-
-- **核心闭环**：
-  1. 彻底解耦硬编码 `F12` 快捷键，落地 `vok-core` 纯领域模型，支持 `Super + Space`、`Alt + Space`、`Ctrl + ~` 等任意标准组合；
-  2. SQLite WAL 新增 `app_settings` 表，单写者串行持久化用户专属配置；
-  3. GNOME `custom-keybinding` 动态热更新，修改即刻生效无需重启进程；
-  4. 封装 `HotkeyRecorder` 交互组件与 `SettingsPopover` 浮层面板，主窗口内 Toggle 按键比对与底部 Footer 状态文本实时联动同步。
 
 ## 指引
 

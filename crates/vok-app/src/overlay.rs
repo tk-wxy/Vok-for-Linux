@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,6 +29,8 @@ pub struct OverlayWindow {
     three_pane: Rc<ThreePaneContainer>,
     _settings_popover: Rc<SettingsPopover>,
     on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
+    previous_active_window: Rc<Cell<Option<u32>>>,
+    has_been_active: Rc<Cell<bool>>,
 }
 
 impl OverlayWindow {
@@ -254,12 +256,35 @@ impl OverlayWindow {
         });
         root_box.add_controller(click_gesture);
 
+        // 9. 失焦自动退出 (Focus-Out Auto-Close)
+        let has_been_active = Rc::new(Cell::new(false));
+        let previous_active_window = Rc::new(Cell::new(None));
+        {
+            let on_dismiss_focus = on_dismiss.clone();
+            let has_been_active_clone = has_been_active.clone();
+            window.connect_is_active_notify(move |win| {
+                let active = win.is_active();
+                debug!("OverlayWindow is_active 状态变更: {}", active);
+                if active {
+                    has_been_active_clone.set(true);
+                } else if has_been_active_clone.get() && win.is_visible() {
+                    has_been_active_clone.set(false);
+                    info!("【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)，触发自动退出");
+                    if let Some(cb) = on_dismiss_focus.borrow().as_ref() {
+                        cb();
+                    }
+                }
+            });
+        }
+
         Self {
             window,
             header,
             three_pane,
             _settings_popover: settings_popover,
             on_dismiss,
+            previous_active_window,
+            has_been_active,
         }
     }
 
@@ -273,8 +298,21 @@ impl OverlayWindow {
         self.three_pane.set_on_drop(callback);
     }
 
-    /// 呈现窗口并默认聚焦于顶部搜索框
+    /// 呈现窗口并默认聚焦于顶部搜索框，同时暂存原前台活动窗口
     pub fn reveal(&self, gen: GenerationId) {
+        // 呼出前暂存当前活动窗口 (原前台应用)
+        if let Some(xid) = vok_infra::WindowAdapter::get_active_window_id() {
+            let is_self = vok_infra::WindowAdapter::get_window_title(xid)
+                .is_some_and(|t| t == "Vok Overlay");
+            if !is_self {
+                let title = vok_infra::WindowAdapter::get_window_title(xid)
+                    .unwrap_or_else(|| "未知应用".to_string());
+                info!("【前台焦点暂存】捕获到前台活动窗口: [0x{:x}] ({})", xid, title);
+                self.previous_active_window.set(Some(xid));
+            }
+        }
+
+        self.has_been_active.set(false);
         self.header.set_status(&format!("会话中 [{gen}]"));
         self.window.maximize();
         self.window.set_visible(true);
@@ -284,9 +322,22 @@ impl OverlayWindow {
         self.header.search_entry().grab_focus();
     }
 
-    /// 隐藏窗口
+    /// 隐藏窗口并原子交还原前台窗口焦点
     pub fn hide(&self) {
+        self.has_been_active.set(false);
         self.window.set_visible(false);
+
+        // 原子交还原前台焦点
+        if let Some(xid) = self.previous_active_window.take() {
+            if let Err(e) = vok_infra::WindowAdapter::restore_active_window(xid) {
+                tracing::warn!("恢复原前台窗口 [0x{:x}] 焦点失败: {:?}", xid, e);
+            }
+        }
+    }
+
+    /// 获取当前暂存的原前台窗口 XID (若存在)
+    pub fn previous_active_window(&self) -> Option<u32> {
+        self.previous_active_window.get()
     }
 
     /// 是否处于可见状态

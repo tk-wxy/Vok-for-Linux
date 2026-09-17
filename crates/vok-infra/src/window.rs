@@ -93,13 +93,116 @@ impl WindowAdapter {
             });
         }
 
-        // 若无 _NET_WORKAREA 属性，默认使用屏幕全屏尺寸
+    // 若无 _NET_WORKAREA 属性，默认使用屏幕全屏尺寸
         Ok(WorkAreaGeometry {
             x: 0,
             y: 0,
             width: screen.width_in_pixels as u32,
             height: screen.height_in_pixels as u32,
         })
+    }
+
+    /// 读取当前桌面活动窗口的 XID (EWMH _NET_ACTIVE_WINDOW)
+    pub fn get_active_window_id() -> Option<u32> {
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let screen = &conn.setup().roots[screen_num];
+
+        let net_active_window_atom = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+
+        let reply = conn
+            .get_property(
+                false,
+                screen.root,
+                net_active_window_atom,
+                AtomEnum::WINDOW,
+                0,
+                1,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+
+        if let Some(mut iter) = reply.value32() {
+            let win = iter.next()?;
+            if win != 0 {
+                return Some(win);
+            }
+        }
+        None
+    }
+
+    /// 获取指定窗口的标题 (用于日志诊断与识别自身)
+    pub fn get_window_title(xid: u32) -> Option<String> {
+        let (conn, _) = x11rb::connect(None).ok()?;
+        let net_wm_name_atom = conn.intern_atom(false, b"_NET_WM_NAME").ok()?.reply().ok()?.atom;
+        let wm_name_atom: u32 = AtomEnum::WM_NAME.into();
+
+        if let Ok(prop) = conn.get_property(false, xid, net_wm_name_atom, AtomEnum::ANY, 0, 1024) {
+            if let Ok(reply) = prop.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(s) = String::from_utf8(reply.value) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+        if let Ok(prop) = conn.get_property(false, xid, wm_name_atom, AtomEnum::ANY, 0, 1024) {
+            if let Ok(reply) = prop.reply() {
+                if !reply.value.is_empty() {
+                    if let Ok(s) = String::from_utf8(reply.value) {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// 向窗口管理器 (Mutter / KWin) 申请恢复指定窗口的活动前台焦点
+    /// 发送 _NET_ACTIVE_WINDOW ClientMessage (source indication = 2 绕过防焦点窃取限制)
+    pub fn restore_active_window(xid: u32) -> Result<(), WindowError> {
+        if xid == 0 {
+            return Ok(());
+        }
+
+        let (conn, screen_num) = x11rb::connect(None)?;
+        let screen = &conn.setup().roots[screen_num];
+
+        let net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+            .reply()?
+            .atom;
+
+        use x11rb::protocol::xproto::{
+            ClientMessageData, ClientMessageEvent, EventMask, CLIENT_MESSAGE_EVENT,
+        };
+
+        let event_mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+        let event_active = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: xid,
+            type_: net_active_window,
+            data: ClientMessageData::from([
+                2, // 2: Pager / Taskbar / System Panel (高优先级切换)
+                0, // CurrentTime
+                0,
+                0,
+                0,
+            ]),
+        };
+
+        conn.send_event(false, screen.root, event_mask, event_active)?;
+        conn.flush()?;
+
+        info!("【焦点精准返还】已向窗口管理器申请激活原前台窗口 [0x{:x}]", xid);
+        Ok(())
     }
 
     /// 为指定标题的窗口附加 EWMH 跳过任务栏和跳过分页器属性
@@ -353,5 +456,17 @@ mod tests {
         let geom = WindowAdapter::get_work_area();
         assert!(geom.width > 0);
         assert!(geom.height > 0);
+    }
+
+    #[test]
+    fn test_active_window_query_and_restore_does_not_panic() {
+        let active = WindowAdapter::get_active_window_id();
+        if let Some(xid) = active {
+            let _ = WindowAdapter::get_window_title(xid);
+            let res = WindowAdapter::restore_active_window(xid);
+            assert!(res.is_ok());
+        }
+        // xid == 0 应当作为安全 no-op 处理成功
+        assert!(WindowAdapter::restore_active_window(0).is_ok());
     }
 }
