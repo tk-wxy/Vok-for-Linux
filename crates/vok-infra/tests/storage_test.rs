@@ -325,3 +325,41 @@ fn test_r4_stage_never_touches_original_file() {
     client.shutdown();
     cleanup_temp_db(&db_path);
 }
+
+#[test]
+fn test_app_settings_get_set_overwrite() {
+    let db_path = temp_db_path("settings_test");
+    let client = StorageClient::open(&db_path).expect("open client");
+
+    // 1. 读取不存在的配置项应当返回 None
+    let init_val = client.get_setting("hotkey.summon").expect("get setting");
+    assert_eq!(init_val, None);
+
+    // 2. 写入配置项
+    client
+        .set_setting("hotkey.summon", "<Super>space")
+        .expect("set setting");
+    let val1 = client.get_setting("hotkey.summon").expect("get setting");
+    assert_eq!(val1.as_deref(), Some("<Super>space"));
+
+    // 3. 覆盖已有配置项
+    client
+        .set_setting("hotkey.summon", "F12")
+        .expect("overwrite setting");
+    let val2 = client.get_setting("hotkey.summon").expect("get setting");
+    assert_eq!(val2.as_deref(), Some("F12"));
+
+    // 4. 写入其他配置项
+    client
+        .set_setting("ui.theme", "dark")
+        .expect("set theme");
+    let theme_val = client.get_setting("ui.theme").expect("get setting");
+    assert_eq!(theme_val.as_deref(), Some("dark"));
+
+    // 原快捷键配置保持不变
+    let val3 = client.get_setting("hotkey.summon").expect("get setting");
+    assert_eq!(val3.as_deref(), Some("F12"));
+
+    client.shutdown();
+    cleanup_temp_db(&db_path);
+}

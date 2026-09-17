@@ -222,6 +222,38 @@ impl StorageClient {
         rx.recv().map_err(|_| StorageError::ChannelClosed)?
     }
 
+    // ==================== 通用配置 (Settings) 接口 ====================
+
+    /// 查询指定 key 的配置项 (利用 WAL 无锁只读并发)
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, StorageError> {
+        let conn = self.open_read_connection()?;
+        let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![key])?;
+        if let Some(row) = rows.next()? {
+            let val: String = row.get(0)?;
+            Ok(Some(val))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 设置配置项 (由 StorageWorker 串行持久化落盘)
+    pub fn set_setting(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), StorageError> {
+        let (reply, rx) = bounded(1);
+        self.cmd_tx
+            .send(StorageCommand::SetSetting {
+                key: key.into(),
+                value: value.into(),
+                reply,
+            })
+            .map_err(|_| StorageError::ChannelClosed)?;
+        rx.recv().map_err(|_| StorageError::ChannelClosed)?
+    }
+
     /// 主动终止写 Worker 线程
     pub fn shutdown(&self) {
         debug!("向 StorageWorker 发送 Shutdown 信号");

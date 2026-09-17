@@ -52,6 +52,13 @@ pub(crate) enum StorageCommand {
         reply: Sender<Result<usize, StorageError>>,
     },
 
+    // 系统配置写操作
+    SetSetting {
+        key: String,
+        value: String,
+        reply: Sender<Result<(), StorageError>>,
+    },
+
     // 终止写工作线程
     Shutdown,
 }
@@ -129,6 +136,10 @@ impl StorageWorker {
                         }
                         StorageCommand::ClearUnpinnedStageItems { reply } => {
                             let res = Self::handle_clear_unpinned_stage_items(&mut conn);
+                            let _ = reply.send(res);
+                        }
+                        StorageCommand::SetSetting { key, value, reply } => {
+                            let res = Self::handle_set_setting(&mut conn, key, value);
                             let _ = reply.send(res);
                         }
                         StorageCommand::Shutdown => {
@@ -268,5 +279,22 @@ impl StorageWorker {
     fn handle_clear_unpinned_stage_items(conn: &mut Connection) -> Result<usize, StorageError> {
         let count = conn.execute("DELETE FROM stage_items WHERE pinned = 0", [])?;
         Ok(count)
+    }
+
+    fn handle_set_setting(
+        conn: &mut Connection,
+        key: String,
+        value: String,
+    ) -> Result<(), StorageError> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms",
+            params![key, value, now_ms],
+        )?;
+        Ok(())
     }
 }

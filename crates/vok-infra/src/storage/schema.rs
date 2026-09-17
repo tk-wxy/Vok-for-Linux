@@ -53,6 +53,13 @@ pub fn initialize_schema(conn: &Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_stage_order ON stage_items(order_index);
         CREATE INDEX IF NOT EXISTS idx_stage_path ON stage_items(path);
+
+        -- 3. 通用设置与偏好表
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
         ",
     )?;
 
@@ -80,5 +87,6 @@ mod tests {
 
         assert!(tables.contains(&"launcher_items".to_string()));
         assert!(tables.contains(&"stage_items".to_string()));
+        assert!(tables.contains(&"app_settings".to_string()));
     }
 }

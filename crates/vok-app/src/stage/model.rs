@@ -78,7 +78,9 @@ mod tests {
 
     #[test]
     fn test_stage_object_wrapper_and_mutations() {
-        let _ = gtk4::init();
+        if !gtk4::is_initialized() {
+            let _ = gtk4::init();
+        }
 
         let item = StageItem::from_path_ref(
             100,

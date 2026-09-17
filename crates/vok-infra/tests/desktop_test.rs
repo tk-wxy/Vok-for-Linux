@@ -129,3 +129,73 @@ fn test_thumbnail_quota_cleanup_logic() {
 
     let _ = fs::remove_dir_all(quota_test_dir);
 }
+
+#[test]
+fn test_desktop_shortcut_conflict_resolution() {
+    use vok_infra::desktop::DesktopShortcut;
+
+    let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if !current_desktop.contains("GNOME") && !current_desktop.contains("ubuntu") {
+        return;
+    }
+
+    // 1. 模拟绑定 Alt+Space，验证 activate-window-menu 被设为 []
+    DesktopShortcut::handle_system_conflicts("<Alt>space");
+    let out1 = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .output()
+        .expect("gsettings get");
+    let text1 = String::from_utf8_lossy(&out1.stdout).trim().to_string();
+    assert!(text1 == "@as []" || text1 == "[]", "activate-window-menu 应当被清空以避让冲突");
+
+    // 2. 模拟切离 Alt+Space (如切换回 F12)，验证 activate-window-menu 被还原为默认值
+    DesktopShortcut::handle_system_conflicts("F12");
+    let out2 = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .output()
+        .expect("gsettings get");
+    let text2 = String::from_utf8_lossy(&out2.stdout).trim().to_string();
+    assert!(text2.contains("<Alt>space"), "切离后应当自动还原系统原有快捷键");
+}
+
+#[test]
+fn test_recording_conflict_lifecycle() {
+    use vok_infra::desktop::DesktopShortcut;
+
+    let current_desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if !current_desktop.contains("GNOME") && !current_desktop.contains("ubuntu") {
+        return;
+    }
+
+    // 1. 进入录入态：临时挂起 activate-window-menu
+    DesktopShortcut::prepare_recording_conflicts();
+    let out1 = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .output()
+        .expect("gsettings get");
+    let text1 = String::from_utf8_lossy(&out1.stdout).trim().to_string();
+    assert!(text1 == "@as []" || text1 == "[]", "进入录入态应当立即清空 activate-window-menu");
+
+    // 2. 取消录入 (Esc/失焦且当前是 F12)：恢复默认
+    DesktopShortcut::restore_recording_conflicts("F12");
+    let out2 = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .output()
+        .expect("gsettings get");
+    let text2 = String::from_utf8_lossy(&out2.stdout).trim().to_string();
+    assert!(text2.contains("<Alt>space"), "取消录入且原键非 Alt+Space 应当还原系统菜单");
+
+    // 3. 再次进入录入态并成功提交 Alt+Space：保持清空接管
+    DesktopShortcut::prepare_recording_conflicts();
+    DesktopShortcut::restore_recording_conflicts("<Alt>space");
+    let out3 = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .output()
+        .expect("gsettings get");
+    let text3 = String::from_utf8_lossy(&out3.stdout).trim().to_string();
+    assert!(text3 == "@as []" || text3 == "[]", "提交 Alt+Space 应当继续保持接管清空状态");
+
+    // 清理还原
+    DesktopShortcut::handle_system_conflicts("F12");
+}
+

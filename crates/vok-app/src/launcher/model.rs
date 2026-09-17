@@ -52,7 +52,9 @@ mod tests {
 
     #[test]
     fn test_launcher_object_wrapper() {
-        let _ = gtk4::init();
+        if !gtk4::is_initialized() {
+            let _ = gtk4::init();
+        }
 
         let item = LauncherItem::new(
             42,

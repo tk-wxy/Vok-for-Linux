@@ -5,7 +5,10 @@ pub mod model;
 pub mod session;
 
 pub use generation::{GenerationId, GenerationIssuer};
-pub use hotkey::{HotkeyMode, DEFAULT_TAP_MAX_MS};
+pub use hotkey::{
+    HotkeyConfig, HotkeyMode, HotkeyParseError, ModifierMask, SystemConflictInfo,
+    DEFAULT_TAP_MAX_MS,
+};
 pub use layout::{
     CardLayoutMath, ComputedCardLayout, ComputedThreePaneLayout, LayoutConstraints,
     ThreePaneConstraints,
