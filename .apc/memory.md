@@ -10,14 +10,15 @@
 
 ## §0 快照
 
-- **Status**: 响应实机测试反馈，彻底攻克“呼出不流畅”与“界面没有显示在最上层”两大体验卡点；实现 8ms D-Bus 极速唤起、EWMH 强制置顶（_NET_WM_STATE_ABOVE）与 XRaiseWindow 硬件级层级提升。
+- **Status**: 全面重构工作区几何计算机制，彻底移除外层圆角与写死缝隙，实现 100% 动态严丝合缝全屏 HUD 覆盖。
 - **Latest progress**: 
-  1. **呼出性能飞跃（300ms -> 8ms）**：排查发现原快捷键每次均执行 `vok-app` 导致 fork+exec 整个 GTK 进程；改用 GApplication 原生 D-Bus Action `"toggle"` + `gdbus` 极速调用，触发耗时缩短 35 倍以上，完全在常驻守护进程内零开销响应；
-  2. **100% 霸屏置顶与层级提升**：窗口新增注入 `_NET_WM_STATE_ABOVE`、`_NET_WM_STATE_STAYS_ON_TOP`；呼出时发送 `_NET_ACTIVE_WINDOW`（source=2: Pager/Panel 绕过 GNOME 防焦点窃取）并执行 X11 原生 `configure_window(StackMode::ABOVE)`，首帧渲染后 20ms 二次强化，保证在任何全屏应用之上；
-  3. **会话状态机 Toggle 闭环**：在 Toggle 呼出时原子投递 `PhysicalPress` 与 `PhysicalRelease`，保证状态机精准进入稳定常驻的 `Visible { mode: Toggle, is_key_down: false }`；
-  4. 6 项量化门禁全绿，Clippy 0 警告，Release 编译成功并已在后台常驻运行。
-- **Next step**: 用户人工体验极速置顶呼出；随后推进切片 S3（快捷键录入交互组件）与 Milestone M2（剪贴板监听与直接粘贴）。
-- **Known issues**: evdev 硬件直读受系统用户组权限限制（当前通过 GNOME D-Bus 8ms 极速快捷键已实现极致丝滑体验）。
+  1. **直角沉浸 HUD**：彻底移除外层 `border-radius: 20px` 设为纯直角 `0px`，移除外边框，背景统一为沉浸暗色，四角与边缘彻底消灭透底现象；
+  2. **EWMH _NET_WORKAREA 通用动态适配**：摒弃“假定任务栏只在左侧/顶部”与 `-16px/-12px` 的写死扣减，直接信赖窗口管理器权威发布的净工作区尺寸与坐标，自适应任意桌面环境（左/右/顶/底或隐藏任务栏）；
+  3. **X11 协议级绝对几何锁定**：在 `ConfigureWindow` 中直接传入 `workarea.x/y/width/height`，物理级强行对齐；
+  4. **三栏精密内边距对齐**：三栏宽度严格传入 `logical_width - 40`，加上容器左右 padding 恒等于 `logical_width`，`xwininfo` 验证物理右侧和底部缝隙均为 **0 像素**（Corners: `+132+64 -0+64 -0-0 +132-0`）；
+  5. 门禁测试全绿，Clippy 0 警告，Release 构建并在后台持续运行中。
+- **Next step**: 用户验证全新无圆角、零缝隙、全屏覆盖表现；随后推进切片 S3（快捷键录入交互组件）与 Milestone M2。
+- **Known issues**: 无。通用多桌面全屏覆盖与 8ms 极速快捷键已全部就绪。
 
 ## §0A 最近会话
 

@@ -173,3 +173,24 @@
      - 在 Toggle 呼出链路中原子注入 `PhysicalPress` 与 `PhysicalRelease`，保证状态机精准进入稳定常驻的 `Visible { mode: Toggle, is_key_down: false }`。
 - **状态**：Active（2026-09-17 确立）。
 
+---
+
+### §12 通用全屏工作区（EWMH _NET_WORKAREA）自适应计算与纯直角边缘规范
+
+- **背景与痛点**：
+  人工测试反馈工作台未实现真正全屏覆盖，外层带大圆角导致桌面壁纸透出，且右侧和底部存在 32px / 24px 大缝隙。根因排查发现：
+  1. 样式表在 `.vok-root-container` 上写死了 `border-radius: 20px` 与外边框，破坏了第二桌面 HUD 与屏幕边缘切齐的纯净感；
+  2. 代码硬编码减去了 `-16px` 和 `-12px` 的“安全间距”，且假设任务栏仅位于左侧与顶部，无法适应任务栏在底部、右侧、隐藏或多显示器的桌面环境；
+  3. 未在三栏计算时扣除内边距（40px），曾导致内容撑破窗口，进而诱发了上述负向硬编码补丁。
+- **最终方案**：
+  1. **彻底直角与纯黑沉浸底色**：移除所有外层圆角（`border-radius: 0px`）与边框（`border: none`），窗口背景设为不透明暗色（`rgba(18, 20, 28, 0.95)`），确保与屏幕边缘或任务栏绝对无缝拼接；
+  2. **EWMH _NET_WORKAREA 权威动态映射**：
+     - 直接信赖 X11 窗口管理器发布的 `_NET_WORKAREA = [x, y, width, height]`（无论任务栏在左/右/顶/底还是自动隐藏，均已权威扣减完成）；
+     - 结合显示器 HiDPI Scale 无损换算为逻辑尺寸，严禁任何人工扣减或写死偏移；
+  3. **X11 协议级坐标与几何强行锁定**：
+     - 在 `set_skip_taskbar` 中通过 `conn.configure_window` 明确传入 `x, y, width, height`，硬件级将窗口锚定至工作区起点并拉伸至全部可用宽高；
+  4. **三栏内容几何精密扣除**：
+     - 传入 `three_pane.apply_geometry` 的宽度严格为 `logical_width - 40`，三栏总宽加上左右 padding 恒等于 `logical_width`，零像素误差。
+- **状态**：Active（2026-09-17 确立）。
+
+
