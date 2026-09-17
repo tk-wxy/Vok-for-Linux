@@ -36,3 +36,15 @@
 - 实现 `vok-app`：构建 GTK 4 全屏深色毛玻璃遮罩窗口、`GtkDropTarget` 外部拖拽入站中转、Esc 与空白处点击关闭，并通过 `async-channel` + `glib::spawn_future_local` 达成零 sleep 异步事件桥接。
 - 编写并全绿通过 12 项单元测试，实机成功运行并准确计算当前多屏工作区避让（`3068x1936+132+64`），Release 生产二进制仅 1.5MB。
 
+### Session 2026-09-16 - 修复三栏右侧遮挡与工作区避让
+
+- 测算出主屏 3200x2000 HiDPI (Scale 2)，左任务栏 132 物理像素 (66 逻辑像素)，净可用工作区 3068x1936；
+- 移除卡片 `min-width: 68px` 与 GridView 默认外边距，校准根容器 padding 为 `20px 23px`，三栏完整可见无截断。
+
+### Session 2026-09-16 - 落地切片 S1（任务栏隐形）与切片 S2（系统托盘常驻）
+
+- 落地 EWMH `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_WINDOW_TYPE_UTILITY`，Ubuntu Dock 彻底无图标、无运行圆点；
+- 接入 `ksni` (SNI) 规范，系统顶部通知栏常驻 `view-grid-symbolic` 图标，支持左键 Toggle 与右键上下文菜单；
+- `gio::ApplicationHoldGuard` 确保窗口隐藏时后台守护不退出（常驻内存 `< 5MB`）。
+
+

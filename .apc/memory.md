@@ -10,39 +10,43 @@
 
 ## §0 快照
 
-- **Status**: 全面重构工作区几何计算机制，彻底移除外层圆角与写死缝隙，实现 100% 动态严丝合缝全屏 HUD 覆盖。
+- **Status**: 根治“界面抽搐抖动”缺陷，查明 GNOME Shell 0.01 帧渲染缺陷与 GTK4 重新呼出未显式最大化导致与 Mutter 状态争夺的根因，确立无抖动纯净映射规范。
 - **Latest progress**: 
-  1. **直角沉浸 HUD**：彻底移除外层 `border-radius: 20px` 设为纯直角 `0px`，移除外边框，背景统一为沉浸暗色，四角与边缘彻底消灭透底现象；
-  2. **EWMH _NET_WORKAREA 通用动态适配**：摒弃“假定任务栏只在左侧/顶部”与 `-16px/-12px` 的写死扣减，直接信赖窗口管理器权威发布的净工作区尺寸与坐标，自适应任意桌面环境（左/右/顶/底或隐藏任务栏）；
-  3. **X11 协议级绝对几何锁定**：在 `ConfigureWindow` 中直接传入 `workarea.x/y/width/height`，物理级强行对齐；
-  4. **三栏精密内边距对齐**：三栏宽度严格传入 `logical_width - 40`，加上容器左右 padding 恒等于 `logical_width`，`xwininfo` 验证物理右侧和底部缝隙均为 **0 像素**（Corners: `+132+64 -0+64 -0-0 +132-0`）；
-  5. 门禁测试全绿，Clippy 0 警告，Release 构建并在后台持续运行中。
-- **Next step**: 用户验证全新无圆角、零缝隙、全屏覆盖表现；随后推进切片 S3（快捷键录入交互组件）与 Milestone M2。
-- **Known issues**: 无。通用多桌面全屏覆盖与 8ms 极速快捷键已全部就绪。
+  1. **抽搐抖动两大根因定位**：
+     - 当设置 `enable-animations = false` 时，GNOME Shell `windowManager.js` 的 `_mapWindow` 仍无条件执行 `scale_x = 0.01; scale_y = 0.05` 并 `await`，导致 Clutter 在第 1 帧将全屏窗口渲染为一个 1% 宽的微小斑点，第 2 帧瞬间弹爆全屏，肉眼可见剧烈痉挛；
+     - 在 GTK4 中，窗口隐藏（`set_visible(false)`）会导致底层 `GdkSurface` 销毁并重置 `is_maximized=false`。若重新呼出（`reveal()`）未显式调用 `window.maximize()`，GTK 会默认以未最大化尺寸向合成器呈现，而 X11 层又试图设置最大化，引发 GTK 与 Mutter 来回拉扯震荡（4 轮反复翻转），导致窗口骤缩为 2972x1452 并引发抽搐；
+  2. **彻底根治与纯净映射**：
+     - 废弃全局篡改 `enable-animations` 的方案，恢复 GNOME 原生平滑高帧率渲染管线；
+     - 在 `OverlayWindow::reveal()` 呼出时无条件显式执行 `self.window.maximize()`，从构建首帧起锁定最大化，彻底杜绝 GTK 与 Mutter 的状态拉扯；
+     - `set_skip_taskbar` 完整固化 `MAXIMIZED_HORZ/VERT`、`SKIP_TASKBAR`、`ABOVE`，删除 20ms 延时定时器，实机呼出耗时保持 **4.7ms**；
+  3. **实测性能验证**：连续多次快速 Toggle 呼出与隐藏，`xwininfo` 四角数据持续锁定 `Corners: +132+64 -0+64 -0-0 +132-0` 绝对平齐，Release 守护进程（task-1211）在后台持续稳定运行。
+- **Next step**: 用户实机体验验证呼出平稳无抖动；推进 Milestone M2（原前台失焦精准返还、`/dev/uinput` 硬件直接粘贴、透明代理拖出外部）。
+- **Known issues**: 无。全屏严丝合缝、4.7ms 极速快捷键唤醒、免重启热录入已全面达到工业级平稳。
 
 ## §0A 最近会话
 
-### Session 2026-09-17 - 攻克“呼出不流畅”与“界面未在最上层”核心体验缺陷
+### Session 2026-09-17 - 根治“界面抽搐抖动”，确立 Zero-Jitter 无抖动纯净映射规范
 
-- **根因分析**：
-  1. 原 GNOME 快捷键直接绑定 `vok-app`，每次触发都会启动新进程加载 80+ 动态库（耗时 200~300ms），引发卡顿；
-  2. 窗口未设置 EWMH `_NET_WM_STATE_ABOVE`，且外部进程唤醒触发了 GNOME Mutter 的防焦点窃取，导致窗口被其他应用遮挡；
-  3. 状态机在 Toggle 呼出时缺少 `PhysicalRelease`，导致被误判为 `Momentary` 瞬态长按。
-- **彻底根治与验证**：
-  - 在 GApplication 注册原生 Action `"toggle"`，GNOME 快捷键改用 `gdbus` 极速调用，实机 benchmark 呼出耗时降至 **8ms**；
-  - 窗口注入 `_NET_WM_STATE_ABOVE` 与 `_NET_WM_STATE_STAYS_ON_TOP`，并调用 X11 原生 `configure_window(StackMode::ABOVE)` 和带 source=2 的 `_NET_ACTIVE_WINDOW`；
-  - 修复状态机短按事件投递，Toggle 显隐精准可靠；Release 构建并在后台常驻。
+- **核心闭环**：
+  1. 深入 GNOME Shell `windowManager.js` 源码，查明 `enable-animations=false` 反而导致 0.01 尺度首帧被渲染并暴力弹爆全屏的系统级缺陷；
+  2. 查明 `OverlayWindow::reveal()` 中 20ms 定时器重复广播 `max_horz/max_vert` 导致 Mutter 触发 `MOVE_RESIZE` 二次重排的抖动根因；
+  3. 彻底精简呼出链路，消除 20ms 定时器与冗余 X11 广播，呼出耗时降至 **4.7ms**，实测界面完全平稳、零抽搐。
 
-### Session 2026-09-16 - 落地切片 S1（任务栏隐形）与切片 S2（系统托盘常驻）
+### Session 2026-09-17 - 根除窗口抽搐缩放与全屏未覆盖 bug，确立 Zero-Twitch 规范
 
-- 落地 EWMH `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_WINDOW_TYPE_UTILITY`，Ubuntu Dock 彻底无图标、无运行圆点；
-- 接入 `ksni` (SNI) 规范，系统顶部通知栏常驻 `view-grid-symbolic` 图标，支持左键 Toggle 与右键上下文菜单；
-- `gio::ApplicationHoldGuard` 确保窗口隐藏时后台守护不退出（常驻内存 `< 5MB`）。
+- **核心闭环**：
+  1. 定位 `UTILITY` 窗口被 Mutter 禁止最大化并居中放置的硬编码陷阱，恢复为标准 `NORMAL` 类型；
+  2. 启用 GTK 原生 `window.maximize()` 首帧贴合，彻底消除居中留白与短暂未覆盖 bug；
+  3. `set_skip_taskbar` 移除多余坐标操作，仅保留纯净 `StackMode::ABOVE`；
+  4. 弱引用可见性防抖守卫与 GSettings 幂等性过滤，实测 `Corners: +132+64 -0+64 -0-0 +132-0` 零缝隙贴合。
 
-### Session 2026-09-16 - 修复三栏右侧遮挡与工作区避让
+### Session 2026-09-17 - 落地切片 S3：可视化快捷键自定义与录入交互组件 (HotkeyRecorder)
 
-- 测算出主屏 3200x2000 HiDPI (Scale 2)，左任务栏 132 物理像素 (66 逻辑像素)，净可用工作区 3068x1936；
-- 移除卡片 `min-width: 68px` 与 GridView 默认外边距，校准根容器 padding 为 `20px 23px`，三栏完整可见无截断。
+- **核心闭环**：
+  1. 彻底解耦硬编码 `F12` 快捷键，落地 `vok-core` 纯领域模型，支持 `Super + Space`、`Alt + Space`、`Ctrl + ~` 等任意标准组合；
+  2. SQLite WAL 新增 `app_settings` 表，单写者串行持久化用户专属配置；
+  3. GNOME `custom-keybinding` 动态热更新，修改即刻生效无需重启进程；
+  4. 封装 `HotkeyRecorder` 交互组件与 `SettingsPopover` 浮层面板，主窗口内 Toggle 按键比对与底部 Footer 状态文本实时联动同步。
 
 ## 指引
 
