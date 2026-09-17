@@ -71,12 +71,13 @@ impl VokApp {
 
             info!("Vok GTK 应用激活初始化...");
 
-            // 0. 尝试自动注册 GNOME 桌面级全局快捷键 (F12) 与静默桌面 Entry (NoDisplay)
-            vok_infra::desktop::DesktopShortcut::ensure_gnome_shortcut("F12");
-            vok_infra::desktop::DesktopShortcut::ensure_desktop_entry();
-
             // 保持 GTK 守护进程在所有窗口隐藏时不退出
             let hold_guard = app.hold();
+
+            // 0. 禁用 GTK 4 应用内部动画 (彻底消除组件级过渡、淡入淡出与缩放延迟)
+            if let Some(settings) = gtk4::Settings::default() {
+                settings.set_gtk_enable_animations(false);
+            }
 
             // 0.1 初始化持久化 SQLite WAL 存储
             let storage = match StorageClient::open_default() {
@@ -86,6 +87,14 @@ impl VokApp {
                     panic!("Fatal: 无法初始化 SQLite 存储: {}", e);
                 }
             };
+
+            // 0.2 读取已保存的全局唤醒快捷键 (若无则默认 F12) 并绑定至 GNOME 桌面环境
+            let active_shortcut = match storage.get_setting("hotkey.summon") {
+                Ok(Some(s)) if !s.trim().is_empty() => s,
+                _ => "F12".to_string(),
+            };
+            vok_infra::desktop::DesktopShortcut::bind_gnome_shortcut(&active_shortcut);
+            vok_infra::desktop::DesktopShortcut::ensure_desktop_entry();
 
             // 0.2 启动异步缩略图后台流水线
             let thumbnail_worker = match ThumbnailWorker::start() {

@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gtk4::gdk::Key;
+use gtk4::glib::translate::IntoGlib;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
@@ -12,11 +13,12 @@ use gtk4::{
 };
 use tracing::{debug, info};
 use vok_core::generation::GenerationId;
+use vok_core::hotkey::HotkeyConfig;
 use vok_infra::desktop::ThumbnailWorker;
 use vok_infra::storage::StorageClient;
 use vok_infra::window::WorkAreaGeometry;
 
-use crate::ui::{apply_theme, HeaderComponent, ThreePaneContainer};
+use crate::ui::{apply_theme, HeaderComponent, SettingsPopover, ThreePaneContainer};
 
 type DismissCallback = Box<dyn Fn()>;
 
@@ -25,6 +27,7 @@ pub struct OverlayWindow {
     window: ApplicationWindow,
     header: Rc<HeaderComponent>,
     three_pane: Rc<ThreePaneContainer>,
+    _settings_popover: Rc<SettingsPopover>,
     on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
 }
 
@@ -86,11 +89,11 @@ impl OverlayWindow {
             .default_height(logical_height as i32)
             .build();
 
-        // 不调用 maximize，直接使用精准计算的逻辑几何尺寸
-        // window.maximize();
+        // 窗口最大化避让任务栏 (在 GNOME/Mutter 下首帧前自动严密贴合 _NET_WORKAREA，杜绝居中跳动与缩放抽搐)
+        window.maximize();
         window.add_css_class("vok-window");
 
-        // 绑定 map 信号：在窗口映射时自动注入 SKIP_TASKBAR 和 UTILITY 属性
+        // 绑定 map 信号：在窗口每次映射时确保权威注入 SKIP_TASKBAR, ABOVE 和 MAXIMIZED
         window.connect_map(|_| {
             vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
         });
@@ -110,6 +113,24 @@ impl OverlayWindow {
         // 3. 顶部 Header 区 (Logo + 全局搜索框 + 设置按钮)
         let header = Rc::new(HeaderComponent::new());
         root_box.append(header.widget());
+
+        // 读取持久化快捷键配置 (默认 F12)
+        let initial_hotkey = match storage.get_setting("hotkey.summon") {
+            Ok(Some(s)) if !s.trim().is_empty() => {
+                HotkeyConfig::from_gsettings_string(&s).unwrap_or_else(|_| HotkeyConfig::default_summon())
+            }
+            _ => HotkeyConfig::default_summon(),
+        };
+        let current_hotkey = Rc::new(RefCell::new(initial_hotkey));
+
+        // 3.1 挂载设置 Popover 面板
+        let settings_popover = Rc::new(SettingsPopover::new(storage.clone(), header.settings_btn()));
+        {
+            let popover_clone = settings_popover.clone();
+            header.settings_btn().connect_clicked(move |_| {
+                popover_clone.popup();
+            });
+        }
 
         let on_dismiss: Rc<RefCell<Option<DismissCallback>>> = Rc::new(RefCell::new(None));
 
@@ -139,13 +160,27 @@ impl OverlayWindow {
         // 6. 底部状态与工作区提示
         let footer_label = Label::builder()
             .label(format!(
-                "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: F12 呼出/关闭, Esc 退出",
-                logical_width, logical_height
+                "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: {} 呼出/关闭, Esc 退出",
+                logical_width, logical_height, current_hotkey.borrow().to_display_string()
             ))
             .css_classes(["vok-footer"])
             .margin_top(4)
             .build();
         root_box.append(&footer_label);
+
+        // 联动快捷键变更：实时刷新 footer 提示与当前比对按键
+        {
+            let footer_label_clone = footer_label.clone();
+            let current_hotkey_clone = current_hotkey.clone();
+            settings_popover.set_on_hotkey_changed(move |new_config| {
+                let display = new_config.to_display_string();
+                footer_label_clone.set_label(&format!(
+                    "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: {} 呼出/关闭, Esc 退出",
+                    logical_width, logical_height, display
+                ));
+                *current_hotkey_clone.borrow_mut() = new_config;
+            });
+        }
 
         window.set_child(Some(&root_box));
 
@@ -159,12 +194,45 @@ impl OverlayWindow {
             w_root.width(), w_root.width()
         );
 
-        // 7. 注册 Esc / F12 快捷键关闭
+        // 7. 注册 Esc / 动态快捷键关闭
         let key_controller = EventControllerKey::new();
         let on_dismiss_esc = on_dismiss.clone();
-        key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, _state| {
-            if keyval == Key::Escape || keyval == Key::F12 {
-                debug!("用户按下 Esc/F12 键请求退出工作台");
+        let current_hotkey_for_key = current_hotkey.clone();
+        key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, modifier_state| {
+            if keyval == Key::Escape {
+                debug!("用户按下 Esc 键请求退出工作台");
+                if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
+                    cb();
+                }
+                return glib::Propagation::Stop;
+            }
+
+            // 动态比对当前生效的唤醒快捷键 (实现窗口内再次按下唤醒键执行 Toggle 关闭)
+            let cur = current_hotkey_for_key.borrow();
+            let is_match = {
+                let ctrl = modifier_state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
+                let alt = modifier_state.contains(gtk4::gdk::ModifierType::ALT_MASK);
+                let shift = modifier_state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
+                let super_key = modifier_state.contains(gtk4::gdk::ModifierType::SUPER_MASK);
+
+                let mask_match = cur.modifiers.ctrl == ctrl
+                    && cur.modifiers.alt == alt
+                    && cur.modifiers.shift == shift
+                    && cur.modifiers.super_key == super_key;
+
+                let key_match = if cur.keyval > 0 && cur.keyval == keyval.into_glib() {
+                    true
+                } else if let Some(name) = keyval.name() {
+                    name.eq_ignore_ascii_case(&cur.key_name)
+                } else {
+                    false
+                };
+
+                mask_match && key_match
+            };
+
+            if is_match {
+                debug!("用户在窗口内再次按下唤醒快捷键，执行 Toggle 退出");
                 if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
                     cb();
                 }
@@ -190,6 +258,7 @@ impl OverlayWindow {
             window,
             header,
             three_pane,
+            _settings_popover: settings_popover,
             on_dismiss,
         }
     }
@@ -207,16 +276,9 @@ impl OverlayWindow {
     /// 呈现窗口并默认聚焦于顶部搜索框
     pub fn reveal(&self, gen: GenerationId) {
         self.header.set_status(&format!("会话中 [{gen}]"));
+        self.window.maximize();
         self.window.set_visible(true);
         self.window.present();
-
-        // 1. 立即应用跳过任务栏与强制置顶
-        vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
-
-        // 2. 在合成器完成首帧映射后再次强化置顶与焦点锁定 (双重保险，彻底杜绝被其他窗口遮挡)
-        glib::timeout_add_local_once(std::time::Duration::from_millis(20), move || {
-            vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
-        });
 
         // 呼出即入焦：自动聚焦于搜索框
         self.header.search_entry().grab_focus();

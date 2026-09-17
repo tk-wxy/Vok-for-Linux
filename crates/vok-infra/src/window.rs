@@ -117,7 +117,7 @@ impl WindowAdapter {
             Ok(Some(win)) => {
                 let res = Self::set_skip_taskbar(&conn, screen.root, win);
                 if res.is_ok() {
-                    info!("【任务栏彻底隐形】已成功对窗口 [{}] (XID: 0x{:x}) 设置 SKIP_TASKBAR 和 UTILITY", title, win);
+                    info!("【任务栏隐形与工作区贴合】已成功对窗口 [{}] (XID: 0x{:x}) 设置 SKIP_TASKBAR, ABOVE 和 MAXIMIZED", title, win);
                     true
                 } else {
                     warn!("对窗口设置 SKIP_TASKBAR 失败: {:?}", res);
@@ -198,21 +198,49 @@ impl WindowAdapter {
         };
 
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
+        let max_horz = conn
+            .intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?
+            .reply()?
+            .atom;
+        let max_vert = conn
+            .intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?
+            .reply()?
+            .atom;
         let skip_taskbar = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?.reply()?.atom;
         let skip_pager = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")?.reply()?.atom;
         let state_above = conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom;
         let stays_on_top = conn.intern_atom(false, b"_NET_WM_STATE_STAYS_ON_TOP")?.reply()?.atom;
-        let net_wm_window_type = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom;
-        let window_type_utility = conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")?.reply()?.atom;
-        let net_active_window = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom;
+        let net_wm_window_type = conn
+            .intern_atom(false, b"_NET_WM_WINDOW_TYPE")?
+            .reply()?
+            .atom;
+        let window_type_normal = conn
+            .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NORMAL")?
+            .reply()?
+            .atom;
+        let net_active_window = conn
+            .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+            .reply()?
+            .atom;
 
-        // 1. 直接修改窗口属性：设置跳过任务栏与始终置顶
+        // 1. 设置窗口属性 (权威固化最大化、跳过任务栏、分页器、强制置顶属性)
+        tracing::debug!(
+            "【X11 Atoms】max_h={}, max_v={}, skip_t={}, skip_p={}, above={}, on_top={}",
+            max_horz, max_vert, skip_taskbar, skip_pager, state_above, stays_on_top
+        );
         conn.change_property32(
             PropMode::REPLACE,
             win,
             net_wm_state,
             AtomEnum::ATOM,
-            &[skip_taskbar, skip_pager, state_above, stays_on_top],
+            &[
+                max_horz,
+                max_vert,
+                skip_taskbar,
+                skip_pager,
+                state_above,
+                stays_on_top,
+            ],
         )?;
 
         conn.change_property32(
@@ -220,12 +248,29 @@ impl WindowAdapter {
             win,
             net_wm_window_type,
             AtomEnum::ATOM,
-            &[window_type_utility],
+            &[window_type_normal],
         )?;
 
         let event_mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
 
-        // 2. 发送 ClientMessage 通知窗口管理器 (Mutter / KWin) 附加置顶状态
+        // 2. 发送 ClientMessage 通知窗口管理器附加最大化状态
+        let event_max = ClientMessageEvent {
+            response_type: CLIENT_MESSAGE_EVENT,
+            format: 32,
+            sequence: 0,
+            window: win,
+            type_: net_wm_state,
+            data: ClientMessageData::from([
+                1, // _NET_WM_STATE_ADD
+                max_horz,
+                max_vert,
+                1,
+                0,
+            ]),
+        };
+        conn.send_event(false, root, event_mask, event_max)?;
+
+        // 3. 发送 ClientMessage 通知窗口管理器 (Mutter / KWin) 附加置顶状态
         let event_above = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
@@ -259,7 +304,7 @@ impl WindowAdapter {
         };
         conn.send_event(false, root, event_mask, event_skip)?;
 
-        // 4. 发送 _NET_ACTIVE_WINDOW 强制激活窗口并提升至最前台 (source indication = 2 绕过防焦点窃取)
+        // 5. 发送 _NET_ACTIVE_WINDOW 强制激活窗口并提升至最前台 (source indication = 2 绕过防焦点窃取)
         let event_active = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
@@ -276,18 +321,10 @@ impl WindowAdapter {
         };
         conn.send_event(false, root, event_mask, event_active)?;
 
-        // 5. 硬件级提升窗口层级并精确对齐工作区几何 (相当于 XRaiseWindow + XMoveResizeWindow)
+        // 6. 硬件级提升窗口层级 (相当于 XRaiseWindow / StackMode::ABOVE)
+        // 注意：严禁在运行中对已最大化窗口强制传入 x, y, width, height，避免与合成器布局死锁导致缩放抽搐
         use x11rb::protocol::xproto::{ConfigureWindowAux, StackMode};
-        let mut aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
-        if let Ok(workarea) = Self::query_x11_workarea() {
-            if workarea.width > 0 && workarea.height > 0 {
-                aux = aux
-                    .x(workarea.x)
-                    .y(workarea.y)
-                    .width(workarea.width)
-                    .height(workarea.height);
-            }
-        }
+        let aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
         let _ = conn.configure_window(win, &aux);
 
         conn.flush()?;
