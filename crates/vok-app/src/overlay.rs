@@ -43,65 +43,39 @@ impl OverlayWindow {
                 let rect = monitor.geometry();
                 let scale = monitor.scale_factor().max(1);
                 info!(
-                    "检测到主显示器: 逻辑尺寸 {}x{}, 缩放比={}, 原始工作区: {}",
+                    "检测到主显示器: 逻辑矩形 {}x{}+{}+{}, 缩放比={}, 原始系统工作区: {}",
                     rect.width(),
                     rect.height(),
+                    rect.x(),
+                    rect.y(),
                     scale,
                     geom
                 );
-                // 1. 获取左侧任务栏 (Dock) 与顶部状态栏的实际物理->逻辑避让偏移
-                let dock_offset_x = if geom.x > 0 && scale > 1 && geom.x >= rect.x() + 30 {
-                    (geom.x / scale) as u32
-                } else if geom.x > 0 {
-                    geom.x as u32
-                } else {
-                    0
-                };
-                let panel_offset_y = if geom.y > 0 && scale > 1 && geom.y >= rect.y() + 20 {
-                    (geom.y / scale) as u32
-                } else if geom.y > 0 {
-                    geom.y as u32
-                } else {
-                    0
-                };
 
-                // 2. 扣除左侧任务栏后的净可用宽度 (严防超出屏幕右边界)
-                let net_screen_w = (rect.width() as u32).saturating_sub(dock_offset_x);
-                let w = if geom.width > rect.width() as u32 && scale > 1 {
-                    (geom.width / scale as u32).min(net_screen_w)
-                } else if geom.width > 0 && geom.width <= net_screen_w {
-                    geom.width
+                // 物理工作区 -> 逻辑工作区动态无损映射
+                // 任何桌面环境下，_NET_WORKAREA 均已权威剔除所有位置（左/右/顶/底）的任务栏与面板
+                let (lw, lh) = if geom.width > rect.width() as u32 && scale > 1 {
+                    let w = (geom.width / scale as u32).min(rect.width() as u32);
+                    let h = (geom.height / scale as u32).min(rect.height() as u32);
+                    (w, h)
+                } else if geom.width > 0 && geom.height > 0 {
+                    let w = geom.width.min(rect.width() as u32);
+                    let h = geom.height.min(rect.height() as u32);
+                    (w, h)
                 } else {
-                    net_screen_w
+                    (rect.width() as u32, rect.height() as u32)
                 };
-
-                let net_screen_h = (rect.height() as u32).saturating_sub(panel_offset_y);
-                let h = if geom.height > rect.height() as u32 && scale > 1 {
-                    (geom.height / scale as u32).min(net_screen_h)
-                } else if geom.height > 0 && geom.height <= net_screen_h {
-                    geom.height
-                } else {
-                    net_screen_h
-                };
-
-                // 3. 预留右侧与底部 16px 安全间隙，确保三栏完全居于屏幕可见区，绝不贴边或溢出
-                let safe_w = w.saturating_sub(16);
-                let safe_h = h.saturating_sub(12);
 
                 info!(
-                    "工作区避让计算完成: 任务栏左避让={}px, 顶避让={}px | 最终三栏可用尺寸: {}x{}",
-                    dock_offset_x,
-                    panel_offset_y,
-                    safe_w,
-                    safe_h
+                    "通用全屏工作区适配就绪: 逻辑尺寸 {}x{} (100% 严丝合缝全屏覆盖，零缝隙，零圆角)",
+                    lw, lh
                 );
-
-                (safe_w, safe_h)
+                (lw, lh)
             } else {
-                (geom.width.saturating_sub(16), geom.height.saturating_sub(12))
+                (geom.width, geom.height)
             }
         } else {
-            (geom.width.saturating_sub(16), geom.height.saturating_sub(12))
+            (geom.width, geom.height)
         };
 
         let window = ApplicationWindow::builder()
@@ -148,8 +122,11 @@ impl OverlayWindow {
         root_box.append(three_pane.widget());
 
         // 5. 动态应用三栏宽度与卡片整除防截断高度 (基于逻辑像素计算)
-        let content_height = logical_height.saturating_sub(120);
-        let (pane_geom, card_geom) = three_pane.apply_geometry(logical_width, content_height);
+        // 容器内边距: padding: 16px 20px (左右内边距共 40px, 纵向内边距共 32px)
+        let content_width = logical_width.saturating_sub(40);
+        // 纵向消耗: padding_y (32px) + header (~54px) + footer (~24px) + spacing (12*2=24px) ≈ 134px
+        let content_height = logical_height.saturating_sub(134);
+        let (pane_geom, card_geom) = three_pane.apply_geometry(content_width, content_height);
         info!(
             "三栏几何已计算: 左={}px, 中={}px, 右={}px | 卡片整除行数={}, 单行高={}px (100%防截断)",
             pane_geom.left_width,

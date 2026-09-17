@@ -276,9 +276,19 @@ impl WindowAdapter {
         };
         conn.send_event(false, root, event_mask, event_active)?;
 
-        // 5. 硬件级提升窗口层级 (相当于 XRaiseWindow / StackMode::ABOVE)
+        // 5. 硬件级提升窗口层级并精确对齐工作区几何 (相当于 XRaiseWindow + XMoveResizeWindow)
         use x11rb::protocol::xproto::{ConfigureWindowAux, StackMode};
-        conn.configure_window(win, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE))?;
+        let mut aux = ConfigureWindowAux::new().stack_mode(StackMode::ABOVE);
+        if let Ok(workarea) = Self::query_x11_workarea() {
+            if workarea.width > 0 && workarea.height > 0 {
+                aux = aux
+                    .x(workarea.x)
+                    .y(workarea.y)
+                    .width(workarea.width)
+                    .height(workarea.height);
+            }
+        }
+        let _ = conn.configure_window(win, &aux);
 
         conn.flush()?;
 

@@ -6,14 +6,14 @@ pub fn apply_theme() {
     provider.load_from_string(
         "
         window.vok-window {
-            background-color: transparent;
+            background-color: rgba(18, 20, 28, 0.95);
         }
 
         .vok-root-container {
-            background-color: rgba(18, 20, 28, 0.92);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 20px;
-            padding: 20px 23px;
+            background-color: rgba(18, 20, 28, 0.95);
+            border: none;
+            border-radius: 0px;
+            padding: 16px 20px;
         }
 
         /* 顶部 Header */
