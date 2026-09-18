@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
@@ -9,6 +9,8 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use evdev::{Device, EventType, Key};
 use thiserror::Error;
 use tracing::{debug, info, warn};
+
+use crate::window::WorkAreaGeometry;
 
 #[derive(Error, Debug)]
 pub enum InputError {
@@ -173,6 +175,213 @@ impl EvdevMonitor {
         }
 
         Ok(result)
+    }
+}
+
+/// 基于 Linux 内核 evdev 的物理鼠标硬件级外置点击监听器
+/// 
+/// 直接从 `/dev/input/event*` 读取物理鼠标按键 `BTN_LEFT`，脱离任何 Wayland/Xwayland 合成器事件吞噬限制。
+/// 只要用户物理按下鼠标左键，即刻比对当前光标物理绝对坐标：
+/// - 若在工作区外部（如 Ubuntu Dock 纯黑空白缝隙、顶栏、多屏盲区）：触发自动隐藏；
+/// - 若在工作区内部：静默放行，由 GTK 原生组件正常处理；
+/// - 鼠标任意移动与晃动：产生 0 个按键事件，100% 免疫误退出！
+pub struct EvdevMouseWatcher {
+    running: Arc<AtomicBool>,
+    enabled: Arc<AtomicBool>,
+    workarea: Arc<RwLock<WorkAreaGeometry>>,
+    vok_xid: Arc<AtomicU32>,
+    #[allow(dead_code)]
+    worker_threads: Vec<JoinHandle<()>>,
+}
+
+impl EvdevMouseWatcher {
+    /// 启动后台硬件鼠标监听线程
+    pub fn start<F: Fn() + Send + Sync + 'static>(
+        initial_workarea: WorkAreaGeometry,
+        initial_vok_xid: u32,
+        on_outside_click: F,
+    ) -> Result<Self, InputError> {
+        let devices = Self::discover_mice()?;
+        if devices.is_empty() {
+            return Err(InputError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "未找到具备鼠标按键特性的输入设备",
+            )));
+        }
+
+        let running = Arc::new(AtomicBool::new(true));
+        let enabled = Arc::new(AtomicBool::new(false));
+        let workarea = Arc::new(RwLock::new(initial_workarea));
+        let vok_xid = Arc::new(AtomicU32::new(initial_vok_xid));
+        let on_click = Arc::new(on_outside_click);
+        let mut worker_threads = Vec::new();
+
+        for (path, mut device) in devices {
+            let running_clone = running.clone();
+            let enabled_clone = enabled.clone();
+            let workarea_clone = workarea.clone();
+            let vok_xid_clone = vok_xid.clone();
+            let on_click_clone = on_click.clone();
+
+            let handle = thread::Builder::new()
+                .name(format!("vok-mouse-{}", path.file_name().unwrap_or_default().to_string_lossy()))
+                .spawn(move || {
+                    debug!("开始监听物理鼠标设备: {:?}", path);
+                    let mut touch_down_instant: Option<Instant> = None;
+
+                    while running_clone.load(Ordering::Relaxed) {
+                        match device.fetch_events() {
+                            Ok(events) => {
+                                for ev in events {
+                                    // 1. 触控板轻击 (Tap) 状态机追踪 (BTN_TOUCH 330: 按下至抬起 < 250ms 构成轻击)
+                                    let is_tap = if ev.event_type() == EventType::KEY && ev.code() == Key::BTN_TOUCH.code() {
+                                        if ev.value() == 1 {
+                                            touch_down_instant = Some(Instant::now());
+                                            false
+                                        } else if ev.value() == 0 {
+                                            if let Some(down) = touch_down_instant.take() {
+                                                down.elapsed().as_millis() < 250
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    };
+
+                                    // 2. 物理鼠标按键 (左键、右键、中键、侧键) 物理按下 (value == 1)
+                                    let is_button_press = ev.event_type() == EventType::KEY
+                                        && (ev.code() == Key::BTN_LEFT.code()
+                                            || ev.code() == Key::BTN_RIGHT.code()
+                                            || ev.code() == Key::BTN_MIDDLE.code()
+                                            || ev.code() == Key::BTN_SIDE.code()
+                                            || ev.code() == Key::BTN_EXTRA.code())
+                                        && ev.value() == 1;
+
+                                    if is_button_press || is_tap {
+                                        let current_xid = vok_xid_clone.load(Ordering::Relaxed);
+                                        let current_wa = *workarea_clone.read().unwrap();
+
+                                        if let Some((is_outside, x, y, child)) = crate::WindowAdapter::check_pointer_against_vok(current_wa, current_xid) {
+                                            info!(
+                                                "【内核硬件物理输入】设备 {:?} 捕获到{} (code={}, val={}) | 光标: ({}, {}), child=0x{:x}, vok_xid=0x{:x} | is_outside={}",
+                                                path.file_name().unwrap_or_default(),
+                                                if is_tap { "触控板轻触Tap" } else { "按键点击Click" },
+                                                ev.code(), ev.value(),
+                                                x, y, child, current_xid, is_outside
+                                            );
+
+                                            if !enabled_clone.load(Ordering::Relaxed) {
+                                                debug!("【硬件点击跳过】当前监听处于非激活状态 (enabled=false)");
+                                                continue;
+                                            }
+
+                                            if is_outside {
+                                                info!(
+                                                    "【内核硬件级外置点击感知】确认在工作区外部点击 (x={}, y={}, child=0x{:x})，立即触发自动隐藏",
+                                                    x, y, child
+                                                );
+                                                // 自动临时禁用避免短时重复抖动
+                                                enabled_clone.store(false, Ordering::Relaxed);
+                                                on_click_clone();
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if running_clone.load(Ordering::Relaxed) {
+                                    warn!("读取鼠标设备 {:?} 错误: {:?}", path, e);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    debug!("停止监听物理鼠标设备: {:?}", path);
+                })
+                .map_err(InputError::Io)?;
+
+            worker_threads.push(handle);
+        }
+
+        Ok(Self {
+            running,
+            enabled,
+            workarea,
+            vok_xid,
+            worker_threads,
+        })
+    }
+
+    /// 自动枚举系统中支持鼠标按键的物理输入设备
+    pub fn discover_mice() -> Result<Vec<(PathBuf, Device)>, InputError> {
+        let input_dir = Path::new("/dev/input");
+        let mut result = Vec::new();
+        let mut had_permission_error = false;
+        let mut last_perm_path = PathBuf::new();
+
+        if !input_dir.exists() {
+            return Err(InputError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "/dev/input 目录不存在",
+            )));
+        }
+
+        for entry in fs::read_dir(input_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_name = entry.file_name().to_string_lossy().to_string();
+
+            if file_name.starts_with("event") {
+                match Device::open(&path) {
+                    Ok(device) => {
+                        if let Some(keys) = device.supported_keys() {
+                            if keys.contains(Key::BTN_LEFT) || keys.contains(Key::BTN_RIGHT) {
+                                info!("发现支持鼠标按键的物理设备: {} ({:?})", device.name().unwrap_or("未知"), path);
+                                result.push((path, device));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        had_permission_error = true;
+                        last_perm_path = path;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
+        if result.is_empty() && had_permission_error {
+            return Err(InputError::PermissionDenied(last_perm_path));
+        }
+
+        Ok(result)
+    }
+
+    /// 更新当前生效的工作区几何
+    pub fn update_workarea(&self, geom: WorkAreaGeometry) {
+        if let Ok(mut lock) = self.workarea.write() {
+            *lock = geom;
+        }
+    }
+
+    /// 更新当前生效的 Vok 窗口 XID
+    pub fn update_vok_xid(&self, xid: u32) {
+        self.vok_xid.store(xid, Ordering::Relaxed);
+    }
+
+    /// 启用/禁用点击检测 (当 Vok 呈现时启用，隐藏或处于代理模式时禁用)
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+}
+
+impl Drop for EvdevMouseWatcher {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
     }
 }
 

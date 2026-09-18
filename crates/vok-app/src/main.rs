@@ -39,6 +39,31 @@ fn main() -> glib::ExitCode {
         }
     }
 
+    // 0.1 若传入 --settings / -s，通过 D-Bus 唤起偏好设置窗口并立即退出
+    if args.iter().any(|a| a == "--settings" || a == "-s") {
+        let status = std::process::Command::new("gdbus")
+            .args([
+                "call",
+                "--session",
+                "--dest",
+                "com.vok.desktop",
+                "--object-path",
+                "/com/vok/desktop",
+                "--method",
+                "org.gtk.Actions.Activate",
+                "settings",
+                "[]",
+                "{}",
+            ])
+            .status();
+
+        if let Ok(s) = status {
+            if s.success() {
+                return glib::ExitCode::SUCCESS;
+            }
+        }
+    }
+
     // 默认在 X11 / XWayland 下运行，确保 EWMH 任务栏隐形与工作区避让 100% 生效
     if std::env::var("GDK_BACKEND").is_err() {
         std::env::set_var("GDK_BACKEND", "x11");

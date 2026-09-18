@@ -11,7 +11,7 @@ pub fn apply_theme() {
 
         /* 拖拽反向代理锚点态：保持 Surface 存活但全透明穿透 (规则 R3) */
         window.vok-window.vok-proxy-anchor {
-            background-color: transparent !important;
+            background-color: transparent;
         }
 
         .vok-root-container {
@@ -22,9 +22,9 @@ pub fn apply_theme() {
         }
 
         .vok-root-container.vok-proxy-anchor {
-            background-color: transparent !important;
-            border: none !important;
-            box-shadow: none !important;
+            background-color: transparent;
+            border: none;
+            box-shadow: none;
         }
 
         /* 顶部 Header */
@@ -453,6 +453,202 @@ pub fn apply_theme() {
         .vok-settings-version {
             color: #475569;
             font-size: 10px;
+        }
+
+        /* ==================== 浅色主题模式 (Light Mode) ==================== */
+        window.vok-window.theme-light,
+        .theme-light .vok-root-container,
+        .theme-light.vok-root-container {
+            background-color: rgba(245, 247, 250, 0.96);
+            color: #0f172a;
+        }
+
+        .theme-light .vok-title {
+            color: #0f172a;
+        }
+
+        .theme-light .vok-search-entry {
+            background-color: rgba(0, 0, 0, 0.05);
+            color: #0f172a;
+            border: 1px solid rgba(0, 0, 0, 0.12);
+        }
+
+        .theme-light .vok-search-entry:focus-within {
+            background-color: #ffffff;
+            border-color: #2563eb;
+            box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+        }
+
+        .theme-light .vok-settings-btn {
+            background-color: rgba(0, 0, 0, 0.04);
+            color: #334155;
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        .theme-light .vok-settings-btn:hover {
+            background-color: rgba(0, 0, 0, 0.08);
+            border-color: rgba(0, 0, 0, 0.2);
+            color: #0f172a;
+        }
+
+        .theme-light .vok-status {
+            color: #64748b;
+        }
+
+        .theme-light .vok-pane {
+            background-color: rgba(255, 255, 255, 0.72);
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+        }
+
+        .theme-light .vok-pane-stage {
+            background-color: rgba(255, 255, 255, 0.92);
+            border-color: rgba(0, 0, 0, 0.12);
+        }
+
+        .theme-light .vok-pane-title {
+            color: #0f172a;
+        }
+
+        .theme-light .vok-pane-badge {
+            color: #475569;
+            background-color: rgba(0, 0, 0, 0.06);
+        }
+
+        .theme-light .vok-card-skeleton {
+            background-color: rgba(255, 255, 255, 0.85);
+            border: 1px solid rgba(0, 0, 0, 0.06);
+        }
+
+        .theme-light .vok-card-skeleton:hover {
+            background-color: #ffffff;
+            border-color: rgba(0, 0, 0, 0.15);
+        }
+
+        .theme-light .vok-stage-drop-zone {
+            border: 2px dashed rgba(0, 0, 0, 0.18);
+            background-color: rgba(0, 0, 0, 0.02);
+        }
+
+        .theme-light .vok-stage-drop-zone:hover {
+            border-color: #2563eb;
+            background-color: rgba(37, 99, 235, 0.05);
+        }
+
+        .theme-light .vok-launcher-card {
+            background-color: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        }
+
+        .theme-light .vok-launcher-card:hover {
+            background-color: #ffffff;
+            border-color: rgba(37, 99, 235, 0.4);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .theme-light .vok-launcher-card-title {
+            color: #1e293b;
+        }
+
+        .theme-light .vok-stage-card {
+            background-color: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        }
+
+        .theme-light .vok-stage-card:hover {
+            background-color: #ffffff;
+            border-color: rgba(37, 99, 235, 0.4);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .theme-light .vok-stage-card-title {
+            color: #0f172a;
+        }
+
+        .theme-light .vok-stage-card-meta {
+            color: #64748b;
+        }
+
+        .theme-light .vok-stage-card-path {
+            color: #94a3b8;
+        }
+
+        .theme-light .vok-stage-preview-box {
+            background-color: rgba(0, 0, 0, 0.04);
+        }
+
+        .theme-light .vok-stage-pin-badge {
+            color: #2563eb;
+        }
+
+        .theme-light .vok-clipboard-card {
+            background-color: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.08);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        }
+
+        .theme-light .vok-clipboard-card:hover {
+            background-color: #ffffff;
+            border-color: rgba(37, 99, 235, 0.4);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        }
+
+        .theme-light .vok-clipboard-card-content {
+            color: #1e293b;
+        }
+
+        .theme-light .vok-clipboard-card-time {
+            color: #64748b;
+        }
+
+        .theme-light .vok-footer {
+            color: #64748b;
+        }
+
+        .theme-light .vok-hotkey-box {
+            background-color: rgba(0, 0, 0, 0.04);
+            border-color: rgba(0, 0, 0, 0.12);
+        }
+
+        .theme-light .vok-key-badge {
+            background-color: #ffffff;
+            border-color: rgba(0, 0, 0, 0.15);
+            color: #0f172a;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        }
+
+        .theme-light .vok-key-plus {
+            color: #64748b;
+        }
+
+        .theme-light .vok-hotkey-hint {
+            color: #64748b;
+        }
+
+        .theme-light .vok-btn-preset {
+            background-color: rgba(0, 0, 0, 0.04);
+            border-color: rgba(0, 0, 0, 0.1);
+            color: #334155;
+        }
+
+        .theme-light .vok-btn-preset:hover {
+            background-color: rgba(37, 99, 235, 0.1);
+            border-color: #2563eb;
+            color: #1d4ed8;
+        }
+
+        .theme-light .vok-btn-clear {
+            background-color: rgba(0, 0, 0, 0.04);
+            border-color: rgba(0, 0, 0, 0.1);
+            color: #64748b;
+        }
+
+        .theme-light .vok-btn-clear:hover {
+            background-color: rgba(239, 68, 68, 0.1);
+            border-color: rgba(239, 68, 68, 0.3);
+            color: #ef4444;
         }
         ",
     );

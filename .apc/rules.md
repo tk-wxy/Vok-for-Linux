@@ -17,6 +17,8 @@
 | R9 | 启动台与中转站卡片高度必须遵循显示区域整除算法，规避底部截断 | 布局与渲染 | 否 |
 | R10 | 浮层关闭与消费必须触发原子焦点返还，保障原应用输入上下文不丢失 | 焦点与交互 | 是 |
 | R11 | 坚决杜绝直接复用 Workbench-APP 遗留代码与基于 sleep 的时序规避 | 架构纪律 | 是 |
+| R12 | GNOME Wayland 下 Xwayland 无法感知 Dock 空白处点击，严禁指针停驻猜想 | 窗口管理与输入隔离 | 是 |
+| R13 | Wayland 坐标钳位与触控板轻击 (Tap) 状态机规约 | 输入感知与窗口隔离 | 是 |
 
 ---
 
@@ -76,3 +78,16 @@
   - **范围**：架构纪律
   - **证据**：Workbench-APP 虽在功能与前端形态上验证成熟，但在技术架构上是由于多进程 Web 栈与异步时序失控导致性能低下与 sleep 泛滥的反面教材。
   - **规则**：仅将 Workbench 作为交互范式与功能清单参考，任何代码实现必须基于纯原生 Rust 与 Linux 系统协议重写，严禁直接照搬或引入其基于 sleep 的竞态规避逻辑。
+
+- [ ] R12: GNOME Wayland 下 Xwayland 无法感知 Dock 空白处物理点击，严禁指针停驻猜想。
+  - **范围**：窗口管理与输入隔离
+  - **证据**：Ubuntu Dock 为 Mutter 内部的 Clutter actor（Chrome 层级），位于 X11 工作区外部。在 Wayland 隔离模型下，当光标处于 Dock 区域时 Mutter 不会向 Xwayland 派发指针与按键事件；点击空白处不触发窗口激活或焦点迁移（`_NET_ACTIVE_WINDOW` 与 `is_active` 均保持不变）。XInput2、`query_pointer` 均收不到事件。依赖光标坐标或停留时间（如 200ms）在用户正常移动或晃动鼠标时极易误伤，且自动化测试注入（`warp_pointer`）会产生虚假通过日志。
+  - **规则**：严禁在 UI 轮询中通过光标坐标停驻时间猜想物理“点击”；要么依赖真实焦点迁移事件（Alt+Tab、其他应用激活、Super键系统概览），要么在具备 `/dev/input` 权限时由 `evdev` 直接读取硬件级输入流。
+
+- [ ] R13: Wayland 坐标钳位与触控板轻击 (Tap) 状态机规约。
+  - **范围**：输入感知与窗口隔离
+  - **证据**：在 Wayland 环境下，光标移入 Ubuntu Dock (`x < 132`) 时，Xwayland 根窗口 `query_pointer` 坐标常被 Mutter 钳位在边界（`x=132`），导致 `x < wa.x` 几何判定失效；同时笔记本触控板轻击（Tap）由内核派发 `BTN_TOUCH` (330)，而非实体鼠标按键 `BTN_LEFT` (272)。若仅校验 `x < wa.x` 或仅监听 `BTN_LEFT`，会导致 Dock 空白处物理点击或轻击无法被感知。
+  - **规则**：
+    1. 窗口层级反向排除校验：外部点击判定统一采用 `is_outside = geom_outside || (vok_xid != 0 && child != vok_xid)`。由于 Vok 为 Xwayland 顶层窗口（XID: `0x1800004`），光标处于 Dock 时 Xwayland 的 child 为 0 或非 Vok 窗口，直接突破坐标钳位限制；
+    2. 触控板轻击状态机追踪：`EvdevMouseWatcher` 必须监听 `BTN_TOUCH`，并在按下至抬起时间 < 250ms 时将其识别为物理 Tap，与物理按键（`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA`）同等触发外置点击退让；
+    3. 日志因果性透明：严禁将切换应用/呼出终端时触发的普通 `Focus-Out` 误认为是点击 Dock 隐退，日志需明确记录是【内核硬件物理输入 (evdev)】还是【窗口前台焦点转移 (Focus-Out)】。

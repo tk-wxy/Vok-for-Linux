@@ -21,6 +21,14 @@
 - §15 **GNOME Mutter 动效机制与无抖动纯净映射规范 (Zero-Jitter Pure Mapping Policy)** — 根治 0.01 缩放抽搐与 20ms 二次重排抖动，实现 4.7ms 极速稳定呼出。
 - §16 **EWMH 双向前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out) 与窗口防窃取绕行规范** — 呼出前毫秒级读取活动 XID，关闭原子交还焦点，点击外部平滑自动退让。
 - §17 **基于 /dev/uinput 与 X11 XTEST 双引擎的硬件直接粘贴 (R7) 与反向拖出透明代理锚点保持 (R3)** — 攻克 Wayland 拖出注销掐断会话缺陷，建立 R7 延时时序保护与复合载荷拖出闭环。
+- §18 **独立首选项窗口 (SettingsWindow)、深浅色主题引擎与多轨失焦/Esc可靠隐退设计** — Libadwaita PreferencesWindow 单例常驻、双入口唤起、StyleManager日夜跟随、Capture阶段截断Esc与工作区外部点击失焦感知。
+- §19 **废除 _NET_WM_STATE_ABOVE 强置顶，建立单次呼出激活提升与四维多轨失焦隐退规范 (Focus-Out Auto-Hide Policy)** — 根治 Mutter 在 ABOVE 窗口下抑制前台切换与失焦事件的死穴，建立单次提升、GTK Focus/Active 监听、30ms 外部点击感知与前台 XID 迁移检测四维联动。
+- §20 **全局非界面交互点击捕获、入焦全生命周期守卫与全协议（X11/Wayland/GNOME Shell）失焦归并规范 (Non-Interface Dismiss & Unified Focus-Loss Policy)** — 窗口级 Capture 阶段穿透拾取与非交互空白命中，统合 0x0 与非自身活动窗口判定，建立入焦保护闭环。
+- §21 **工作区最小尺寸约束解除与 EWMH 属性覆盖根治规范 (Workarea Minimum-Size Squeeze & Native Maximization Policy)** — 解除中转站硬性最小宽度锁死（避免 3104px > 3068px 导致 Mutter 拒绝最大化降级为居中悬浮窗），废除 Client 级 REPLACE 覆写 `_NET_WM_STATE`，建立动态重算贴合机制。
+- §22 **GNOME Shell 系统概览（OverviewActive）D-Bus 毫秒级订阅与任务栏指针失焦感知规范 (GNOME Overview & Taskbar Pointer-Loss Policy)** — 解决 Super 键系统概览与 Ubuntu Dock 空白处点击不隐藏死穴，通过 org.gnome.Shell D-Bus 属性与指针移出工作区 150ms 时序双重闭环。（注：指针移出已被 §23 全面废除与替换）。
+- §23 **废除指针移出表面猜想，建立基于 XInput 2 (XI2 RawButtonPress) 全屏幕无侵入物理点击与真实前台失焦架构规范 (True Focus-Loss & XI2 Passive Outside-Click Policy)** — 彻底根除晃动鼠标误退出与点击内联非交互区误关闭病根；基于 XI2 原始按键流被动监听全屏（含 Ubuntu Dock 与顶栏）物理点击；GTK 事件控制器零假动作；鼠标晃动 0 响应；外部点击 100% 精准退让并原子返还焦点。
+- §24 **基于 PolicyKit (Polkit) 原生授权与 Linux 内核 evdev 硬件级全盲区鼠标点击感知规范 (Polkit & Evdev Hardware Mouse Click Policy)** — 建立标准桌面 Polkit 原生认证与现代 `uaccess` 规范，一键图形化授权；封装 `EvdevMouseWatcher` 直接读取物理鼠标 `BTN_LEFT`，实现包含 Ubuntu Dock 纯空白死区在内的全屏任意盲区 0 微秒瞬时退让，鼠标晃动 100% 绝对免疫。
+- §25 **突破 Wayland 坐标钳位与触控板轻击 (Tap) 状态机：双轨窗口层级与全按键退让规范 (Wayland Clamp-Bypass & Touchpad Tap Policy)** — 采用 `child != vok_xid` 突破 Wayland 任务栏坐标钳位死穴；落地触控板 `BTN_TOUCH` 250ms 轻击状态机与全按键监听；澄清日志因果链，彻底攻克 Dock 空白处无法隐退难题。
 
 ---
 
@@ -313,3 +321,226 @@
   4. **门禁验证**：
      - `m2_gate_test.rs` 增设 GATE-M2-3（注入器与 R7 守卫）、GATE-M2-4（拖拽代理与防掐断状态流转）、GATE-M2-5（复合载荷类型检查），全量通过。
 - **状态**：Active（2026-09-18 确立）。
+
+---
+
+### §18 独立首选项窗口 (SettingsWindow)、深浅色主题引擎与多轨失焦/Esc可靠隐退设计
+
+- **背景与痛点**：
+  1. **设置入口受限与内嵌限制**：设置原本作为 `SettingsPopover` 挂载在主工作台 Header 齿轮上，当工作台隐藏时无法从托盘独立打开，且 Popover 受尺寸限制无法承载深色/浅色切换、通道状态与行为控制；
+  2. **缺少浅色/跟随系统主题规范**：全局样式硬编码深色毛玻璃，无法与 GNOME 桌面的日间/夜间配色偏好自适应联动；
+  3. **Esc 键退出假死死穴**：呼出后工作台聚焦居中 `SearchEntry`，GTK4 `SearchEntry` 默认内置 `stop-search` 处理，在 Bubble 冒泡阶段拦截并消费了 `Escape` 键，导致顶层窗口接收不到 Esc 退出信号；
+  4. **点击任务栏/Dock无法失焦死穴**：Ubuntu Dock (`dash-to-dock`) 与 GNOME 顶栏为 `_NET_WM_WINDOW_TYPE_DOCK` 且声明 `InputHint = False`，不接收键盘焦点，Mutter 在用户点击 Dock/顶栏时不会向 Vok 发送 `FocusOut`，导致点击任务栏无法退出。
+- **最终方案**：
+  1. **独立设置窗口架构 (`SettingsWindow`)**：
+     - 基于 `adw::PreferencesWindow` 实现现代原生独立窗口，单例常驻，拦截 `close-request` 转为隐藏；
+     - **双入口无缝联动**：托盘右键菜单增加“⚙ 偏好设置...”（通过异步通道派发 `TrayCommand::OpenSettings`）；工作台右上角齿轮点击时自动原子隐藏 Overlay 并唤起首选项窗口；
+     - 包含快捷键录入与系统冲突规避、深浅色主题切换、失焦与Esc交互行为设置以及关于信息；
+  2. **深浅色与跟随系统主题引擎 (`ThemeManager`)**：
+     - 引入 `vok-core::ThemeMode` 纯契约枚举，SQLite `app_settings` 表持久化 `theme.mode`；
+     - 接入 `adw::StyleManager`，支持 `Default`（跟随系统）、`ForceDark`（深色）与 `ForceLight`（浅色）；
+     - 监听 `dark-notify`，在系统日夜交替时动态切换 `.theme-light` CSS 样式类，提供高对比度米白/灰白通透毛玻璃风格；
+  3. **Esc 键 Capture 阶段强拦截**：
+     - 将主窗口 `EventControllerKey` 传播阶段切换为 `PropagationPhase::Capture`，在事件传递给 `SearchEntry` 之前优先截获 `Key::Escape` 并立即退出；同时为 `SearchEntry::connect_stop_search` 附加兜底联动；
+  4. **双轨失焦自动隐藏机制**：
+     - **轨道 1（活动焦点监听）**：优化 `connect_is_active_notify`，设定呼出首帧 150ms 窗口交割保护期，准确捕获 Alt+Tab、Super 键或点击外部应用；
+     - **轨道 2（工作区外部点击探测）**：利用 X11 `query_pointer` 检查鼠标按键按下状态与工作区边界（`is_pointer_clicking_outside`），当用户点击左侧 Dock (`x < 132`) 或 GNOME 顶栏 (`y < 64`) 时，定时器在 100ms 内灵敏感知并触发原子隐退；
+     - **不变量防护**：严格保持规则 R3（反向拖拽代理模式下忽略失焦）与规则 R10（隐退时原子交还活动前台焦点）。
+- **状态**：Active（2026-09-18 确立）。
+
+---
+
+### §19 废除 _NET_WM_STATE_ABOVE 强置顶，建立单次呼出激活提升与四维多轨失焦隐退规范 (Focus-Out Auto-Hide Policy)
+
+- **背景与痛点**：
+  在实机联调中发现，呼出工作台后，用户点击左侧任务栏 (Ubuntu Dock)、按 Alt+Tab 切换窗口或唤起其它软件时，界面始终不自动隐藏。经实机注入诊断与源码推演，查明根因为：
+  1. **`_NET_WM_STATE_ABOVE` 死锁**：此前在 `set_skip_taskbar` 中固化了 `_NET_WM_STATE_ABOVE`、`_NET_WM_STATE_STAYS_ON_TOP` 与 `StackMode::ABOVE`。在 Mutter 合成器下，最大化且处于 `META_WINDOW_ABOVE` 层的窗口会被 Mutter 视为不可被覆盖的最前台，当用户按 Alt+Tab、点击 Dock 上的应用图标或尝试聚焦其它窗口时，Mutter 会阻止前台焦点的转移，导致 GTK `is_active` 状态永久保持为 `true`，无法感知失焦；
+  2. **外部点击感知采样率过低**：此前 100ms 的外部指针按键轮询（`is_pointer_clicking_outside`）严重滞后于人类典型鼠标点击脉冲（30ms~70ms），极易错失瞬态点击；
+  3. **首帧映射伪激活**：启动时调用 `maximize` 促使窗口提前映射并向系统广播 `_NET_ACTIVE_WINDOW`，导致启动即抢焦，首次按键被迫执行隐藏而非呈现。
+- **最终方案**：
+  1. **废除持续置顶属性**：彻底从 `_NET_WM_STATE` 移除 `_NET_WM_STATE_ABOVE`、`_NET_WM_STATE_STAYS_ON_TOP` 与 `StackMode::ABOVE`，仅保留 `SKIP_TASKBAR`、`SKIP_PAGER` 与 `MAXIMIZED_HORZ/VERT`；
+  2. **单次呼出激活提升 (`raise_and_activate_window_by_title`)**：仅在 `reveal()` 触发时向窗口管理器发送 `_NET_ACTIVE_WINDOW` (source indication = 2) 与 `window.present()`，瞬间将工作台提升至前台并聚焦搜索框，用完即可随时被其它窗口覆盖；
+  3. **四维多轨失焦隐退联动体系**：
+     - **轨道 1 (GTK 焦点控制器)**：挂载 `gtk4::EventControllerFocus` 监听 `leave` 信号；
+     - **轨道 2 (GTK 活动状态监听)**：挂载 `window.connect_is_active_notify`，在 `!win.is_active()` 时安全触发；
+     - **轨道 3 (毫秒级外部点击探测)**：建立 `with_cached_conn` 复用 X11 连接，以 30ms 极低开销轮询，精确识别鼠标在工作区外 (Dock `x < 132` / 顶栏 `y < 64`) 点击；
+     - **轨道 4 (EWMH 前台 XID 迁移检测)**：通过 `get_active_window_id` 实时比对前台活动窗口 XID，一旦检测到非 Vok 的其它应用被激活（如 Alt+Tab 或点击托盘其它应用），毫秒级退出；
+  4. **首帧静默初始化**：窗口构建时显式设置 `.visible(false)`，杜绝首帧伪激活与状态机代次错位。
+- **状态**：Active（2026-09-18 确立）。
+
+---
+
+### §20 全局非界面交互点击捕获、入焦全生命周期守卫与全协议（X11/Wayland/GNOME Shell）失焦归并规范 (Non-Interface Dismiss & Unified Focus-Loss Policy)
+
+- **背景与痛点**：
+  实机测试中用户反馈：“呼出界面后，焦点在界面上；用户点击其他非界面位置没有隐藏”。深入推演与实机排查查明以下三重隐蔽根因：
+  1. **工作台内部空白区域点击冒泡吞噬**：
+     此前仅在 `root_box` 挂载普通 Bubble 阶段的 `GestureClick`。由于工作台三栏布局全屏撑满，其子部件（`ScrolledWindow`、`ColumnView`、`ListView`、`FlowBox`）无条件吞噬了所有点击事件（包括卡片列表下方大片空白区域、栏目间隙与内边距），事件根本无法冒泡至 `root_box`，导致用户点击任何非卡片空白处毫无响应；
+  2. **Wayland / GNOME Shell 原生窗口与概览的 `0x0` 丢焦断层**：
+     此前轮询检测前台活动窗口时，仅在 `active_xid != 0` 时校验窗口标题。然而在 Ubuntu Wayland 架构下，当用户切换至任何原生 Wayland 应用（如 GNOME Terminal、Nautilus、系统设置、文本编辑器）或按下 Super 键进入 GNOME Shell 概览时，XWayland 的 `_NET_ACTIVE_WINDOW` 会变为 `0x0`。此前逻辑由于 `!= 0` 过滤，将所有 Wayland 应用切换和系统概览当成“无变化”直接忽略；
+  3. **未入焦状态下的提前失焦误判 (Premature Dismissal)**：
+     当窗口刚被 `reveal()` 时，窗口管理器完成 X11 映射与焦点交接需要数十至数百毫秒。若直接检测 `!win.is_active()`，会导致在窗口尚未正式入焦前便误以为“失焦”，触发自杀式闪退。
+- **最终方案**：
+  1. **窗口级 Capture 阶段穿透拾取 (`win.pick`) 与非交互空白命中 (`is_interactive_widget`)**：
+     - 在 `window` 级别挂载 `GestureClick` 并设置为 `PropagationPhase::Capture`，抢在任何子列表控件之前截获鼠标按下（`connect_pressed`，无需等待抬起）；
+     - 通过 `win.pick(x, y, PickFlags::DEFAULT)` 提取命中叶子节点并递归其祖先链；
+     - 白名单判定交互控件（`Button`、`MenuButton`、`SearchEntry`、`Entry`、`Text`、`Scrollbar`、`Popover` 以及包含 `card`、`btn`、`item` 等 CSS 类名的卡片容器，同时显式排除 `skeleton` 骨架占位）；
+     - 凡命中非交互区域（卡片下方空白背景、栏目间隔、边距、标题空白），立即毫秒级触发 `on_dismiss()`；
+  2. **全协议失焦统合判定 (`active_xid != my_xid`)**：
+     - 引入 `vok_infra::WindowAdapter::get_vok_window_id()` 缓存获取自身 XID；
+     - 轮询判定时，凡检测到 `active_xid != my_xid`（彻底覆盖 `active_xid == 0` 的原生 Wayland 软件、GNOME Shell 概览与桌面，以及切换至其它 X11 软件），一律作为权威失焦事件瞬时退出；
+  3. **严格的双向入焦全生命周期守卫 (`has_gained_focus`)**：
+     - 新增 `has_gained_focus` 状态；`reveal()` 时初始化为 `false`；
+     - 只有当 `win.is_active() == true`、`focus_ctrl` 收到 `enter` 或轮询探测到 `active_xid == my_xid` 时，方才确立 `has_gained_focus = true`；
+     - 任何基于活动状态的失焦判定必须严格满足 `has_gained_focus == true && !win.is_active()`，彻底杜绝首帧未入焦时的过早闪退，实现坚如磐石的“入焦 -> 焦点转移 -> 自动退出”闭环。
+- **状态**：Active（2026-09-18 确立）。
+
+---
+
+### §21 工作区最小尺寸约束解除与 EWMH 属性覆盖根治规范 (Workarea Minimum-Size Squeeze & Native Maximization Policy)
+
+- **背景与痛点**：
+  在落地失焦自动隐退后，用户反馈：“界面崩坏了；无法显示全屏；呼出一次一个样子；严重不稳定”。通过 `xwininfo` 观测，窗口被降级为未最大化的悬浮窗口（`Width: 3104, Height: 1452, X: 515, Y: 64`），严重偏离全屏工作区（`3068x1936+132+64`）。深入排查定位到三大架构级根因：
+  1. **三栏硬性下限锁死（Min-Size Lockout）**：
+     在 `LayoutAdapter::apply_layout` 中，对左（启动台）、中（中转站）、右（剪贴板）三栏均调用了 `set_size_request`。在 GTK 4 中，`set_size_request(w, -1)` 设定的是部件的**绝对最小尺寸下限（Minimum Size Request）**。三栏宽度总和加上边距间距后，计算出的窗口最小下限为 1552 逻辑像素（HiDPI 2x 下为 **3104 物理像素**）。而由于左侧 Ubuntu Dock 存在（宽 132px），系统工作区宽度为 `3200 - 132 = 3068 物理像素`。
+     **3104px > 3068px**！Mutter 窗口管理器在接收到最大化请求时，由于窗口最小硬性尺寸超过工作区尺寸，**断然拒绝执行最大化**，并将窗口作为悬浮窗居中摆放（X: 515）；
+  2. **EWMH 属性违规覆盖破坏合成器状态机**：
+     在 `set_skip_taskbar` 中，曾调用 `conn.change_property32(PropMode::REPLACE, win, net_wm_state, &[max_horz, max_vert, skip_taskbar, skip_pager])`。根据 EWMH 规范，映射后的窗口其 `_NET_WM_STATE` 绝对归窗口管理器独占维护，Client 端直接 REPLACE 会破坏 Mutter 的内部状态缓存，导致 GTK 4 的 `window.maximize()` 与合成器之间产生状态震荡与多次呼出时的尺寸漂移；
+  3. **工作区几何与前台检测静态冻结**：
+     窗口几何此前仅在 Daemon 启动时获取一次，呼出未重新同步；前台活动窗口查询在 `win == 0` 时返回 `None`，导致点击桌面、任务栏或原生 Wayland 应用时的丢焦信号未被判定为失焦。
+- **最终方案**：
+  1. **中栏解除尺寸下限约束，由 `hexpand(true)` 自然铺满**：
+     - 将中栏（中转站）的 `set_size_request` 调整为 `(-1, -1)`，左栏（25%）与右栏（25%）保持精确宽度，中栏依靠 `hexpand(true)` 自动吸纳剩余全部空间（严格保障 50%）；
+     - 使得窗口整体最小尺寸下限由 1552 逻辑像素骤降至约 1011 逻辑像素（2022 物理像素，远低于 3068px 工作区）；Mutter 接收到最大化指令时毫无阻力，100% 严密贴合工作区；
+  2. **严格遵循 EWMH Client 规范，废除直接属性覆写**：
+     - `set_skip_taskbar` 彻底移除 `change_property32(PropMode::REPLACE)` 与冗余的 `event_max`；
+     - 仅向根窗口发送 `_NET_WM_STATE_ADD` 的 `ClientMessageEvent`（附加 `skip_taskbar` 与 `skip_pager`）；最大化完全交由 GTK 4 原生 `window.maximize()` 驱动，消除与合成器的任何竞态；
+  3. **代次级工作区几何动态刷新与全协议失焦捕获闭环**：
+     - 在每次 `reveal()` 时重新调用 `WindowAdapter::get_work_area()`，动态重算三栏几何与卡片防截断行高；
+     - 轮询检测以 `active_opt != Some(my_xid)` 为准，当前台变为 `None`（桌面、Ubuntu Dock、顶栏或 Wayland 应用）或其它 XID 时，超 300ms 稳定期即可精准触发自动退出；
+  4. **实机验证**：
+     连续 5 次实机呼出并检测 `xwininfo`，每次均稳定保持 `Absolute upper-left X: 132, Y: 64, Width: 3068, Height: 1936, Corners: +132+64 -0+64 -0-0 +132-0`，零居中偏移，零尺寸跳变。
+- **状态**：Active（2026-09-18 确立）。
+
+---
+
+### §22 GNOME Shell 系统概览（OverviewActive）D-Bus 毫秒级订阅与任务栏指针失焦感知规范 (GNOME Overview & Taskbar Pointer-Loss Policy)
+
+- **背景与痛点**：
+  在落地前台失焦自动退出后，用户测试反馈两大盲区场景仍无法隐藏：
+  1. 按下 Super / Windows 键呼出 Ubuntu 系统界面全览 (Activities Overview) 时，Vok 仍然保持显示；
+  2. 点击屏幕左侧任务栏 (Ubuntu Dock) 的空白区域时，Vok 依然不自动隐藏。
+- **根因精确定位 (Root Cause)**：
+  1. **Super 键系统概览的合成器层级脱节**：
+     在 Ubuntu GNOME Wayland (XWayland) 环境下，按下 Super 键时，GNOME Shell 在自身合成器图层呈现 Activities Overview。Mutter 既不向底层 XWayland 切换 `_NET_ACTIVE_WINDOW`（仍指向 Vok 自身的 XID），亦不向下派发 `FocusOut` 或 `notify::is-active` 事件，导致任何基于窗口焦点切换的检测机制完全静默；
+  2. **Ubuntu Dock 为 Wayland 原生 Actor，XWayland 坐标与点击事件截断**：
+     左侧任务栏 (`dash-to-dock`, 宽 132px) 为 Mutter 内部的 Clutter actor。根据 Wayland 安全隔离协议，当鼠标移入 Dock 范围时，Mutter 不会将鼠标点击事件派发给非焦点的 XWayland 客户端；同时 XWayland 的 `query_pointer` 坐标被 Mutter 强制钳制在 `x >= 132`，导致 `is_pointer_clicking_outside` 中的坐标判定与按键掩码在 Wayland 下物理失效。
+- **最终方案**：
+  1. **GNOME Shell Overview D-Bus 属性探测与信号瞬时订阅双轨闭环**：
+     - `vok-infra::WindowAdapter::is_gnome_overview_active()` 查询 Session D-Bus `org.gnome.Shell` 的 `OverviewActive` 布尔属性；
+     - 在 `OverlayWindow` 启动时，通过 GIO D-Bus 连接订阅 `org.gnome.Shell` 的 `PropertiesChanged` 信号，在用户敲击 Super 键的瞬间（0ms 级）接收通知并瞬时调用 `on_dismiss()`；同时在 30ms 轮询定时器中加入兜底检测；
+  2. **指针移出工作区时序防抖感知体系 (Pointer Leave Squeeze Policy)**：
+     - 挂载 GTK4 原生 `EventControllerMotion`，利用 `connect_leave` 与 `connect_enter` 精确追踪光标进入左侧 Dock (`x < 132`) 或顶栏 (`y < 64`) 的物理时间戳；
+     - 设定 150ms 优雅防抖延时守卫：当且仅当光标离开工作区超过 150ms 时（典型的人类移入 Dock 点击或停驻交互），立即判定为失焦退让，触发自动隐藏；而快速误划（<150ms 移回）则安全忽略；
+     - 严格保持规则 R3（反向拖拽透明代理模式下豁免指针移出退出）。
+- **状态**：Superseded by §23（2026-09-18 确立，指针移出猜想被彻底废弃）。
+
+---
+
+### §23 废除指针移出表面猜想，建立基于 XInput 2 (XI2 RawButtonPress) 全屏幕无侵入物理点击与真实前台失焦架构规范 (True Focus-Loss & XI2 Passive Outside-Click Policy)
+
+- **背景与痛点**：
+  在失焦感知迭代过程中，曾引入“指针移出工作区 150ms 超时退让”以及“GTK Capture 阶段拾取非交互组件隐藏”机制。用户实机测试严重受阻：“晃动鼠标都有可能让界面隐藏；完全不是失去焦点点击非 vok 页面隐藏界面；请分析根因，严禁表面工程糊弄”。
+- **根因精确定位 (Root Cause)**：
+  1. **指针移动/移出猜想的致命缺陷**：
+     鼠标快速滑动、在屏幕左侧边缘（接近 x=132 任务栏边界）正常操作、或者用户晃动鼠标时，GTK 的 `EventControllerMotion` 会高频触发 `connect_leave` 事件。依赖移动时序来“猜”用户是否点击任务栏，本质上把“光标移动”与“用户物理点击/真实失焦”混为一谈，导致任何鼠标晃动或掠过边界均引发灾难性的误关闭；
+  2. **GTK Capture 阶段全捕获误伤内联区域**：
+     在 Window 上使用 Capture 阶段的 `GestureClick` 并通过 `pick()` 检查组件类型，容易误将卡片外边距、列头空白、滚动条间隙判定为“非交互区域”而错误吞噬事件并关闭浮层；
+  3. **主动抓取 (XGrabButton) 的死锁与破坏性**：
+     若在 Root 窗口上对外部执行 `grab_button`，不仅会与 Mutter 自身的输入抓取产生 `BadAccess` 冲突，还会冻结指针或导致点击事件无法穿透送达真正的目标应用（如任务栏图标或桌面图标）。
+- **最终方案**：
+  1. **彻底铲除表面假动作与光标移动监听**：
+     - 完全移除 `OverlayWindow` 上的 `EventControllerMotion`、`pointer_leave_time` 及任何超时防抖猜想逻辑；
+     - 完全移除 Window 级的内部捕获 `GestureClick`，浮层内部各部件（启动台、中转站、剪贴板、设置齿轮、搜索框）遵循 GTK4 原生事件传播体系；
+     - **鼠标在屏幕上任意晃动、掠过边界或停驻，产生 0 个退出事件，绝对不可能误触发隐藏**；
+  2. **基于 XInput 2 (XI2 RawButtonPress) 的全屏幕无侵入物理点击感知体系 (`OutsideClickWatcher`)**：
+     - 在 XWayland / X11 架构下，XInput 2 的扩展协议支持在根窗口（Root Window）上为 Master 指针设备（`deviceid = 1`）注册 `XI_RawButtonPress` 事件监听（`xinput_xi_select_events`）；
+     - **完全被动监听（Passive Listening）**：不创建任何独占抓取（No Grab），不冻结指针，不抢占事件，不干扰 Mutter 及其他任何窗口的正常点击响应；
+     - 专用监听线程以阻塞/epoll 方式接收物理按键流，当检测到物理鼠标左/中/右键按下（Button 1, 2, 3）时，即刻通过 `query_pointer` 读取全局物理坐标 `(x, y)`；
+     - 与当前工作区 `WorkAreaGeometry`（如 `3068x1936+132+64`）执行纯几何相交校验：
+       - 若处于工作区内：纯粹静默忽略，GTK 控件正常处理内部点击；
+       - 若处于工作区外（`x < 132` Ubuntu Dock 区域，或 `y < 64` GNOME 顶栏，或多屏工作区外）：瞬时通过无界异步通道（`async_channel`）通知 GTK 主循环执行工作台自动隐藏；
+   3. **Ubuntu Dock 空白处点击事件隔离与表面工程清退**：
+      - 在 Ubuntu GNOME Wayland 环境下，左侧 Ubuntu Dock (`x < 132`) 为 Mutter 内部的 Clutter actor（`dashtodockBox`，`reactive: true`）；
+      - 当用户点击 Dock 空白处时，Clutter 内部消化事件，既不启动应用亦不转移焦点（`_NET_ACTIVE_WINDOW` 与 `is_active` 保持不变）；Wayland 合成器亦绝不向 Xwayland 派发任何指针或按键事件；
+      - 此前曾尝试采用“光标停留 Dock 达 200ms 猜想物理点击”，经实机核验证实其为表面工程假动作：用户正常停顿亦可能误判，且实机真实点击因坐标截断无法可靠捕获；此前日志显示的 `x=50, y=500` 隐退系集成测试在并发执行时通过 `warp_pointer` 注入的伪信号，实机人工点击并未真正隐退；
+      - 依据 R12 规则，已**彻底清除 200ms 停驻猜想代码**，杜绝任何欺骗性假动作与伪闭环；
+   4. **真实物理失焦与事件闭环矩阵 (True Focus-Loss Matrix)**：
+      - **系统概览切换 (Super / 开始键)**：Session D-Bus `org.gnome.Shell` `PropertiesChanged` 信号 0ms 级瞬时响应；
+      - **应用切换 (Alt+Tab / 呼出其它软件 / 外部窗口激活)**：EWMH `_NET_ACTIVE_WINDOW` 毫秒级轮询，前台一旦从 Vok 迁移即刻退出；
+      - **顶部状态栏点击**：点击顶栏控件触发 GNOME Shell 焦点交接，毫秒级退出；
+      - **点击 Dock 应用图标**：Dock 唤起或激活目标应用，前台 XID 迁移触发退出；
+      - **外部 X11 区域物理点击**：XI2 `OutsideClickWatcher` 与 `is_pointer_clicking_outside` 无侵入捕获退出；
+      - **快捷键 / Esc 键**：Capture 阶段优先截获，零延迟退出；
+      - **鼠标晃动与界面内交互**：100% 免疫误退出（晃动 0 响应，点击卡片/按钮/搜索框稳定工作）；
+      - **原子退让与焦点返还**：所有退让路径统一调用 `WindowAdapter::restore_active_window(previous_xid)`，将焦点精准返还给被呼起前的前台应用（VSCode、终端、浏览器）；
+      - **规则 R3 守卫**：处于反向拖出透明代理锚点模式（`is_in_proxy_mode`）时，所有失焦判定严格挂起，确保 Wayland DnD 拖拽会话维系。
+   5. **机制局限与根本出路**：
+      - 在无 root / input 组权限的前提下，X11/Xwayland 客户端在机制上物理无法监听 Wayland 合成器内部 Chrome Actor（Dock 空白处）的纯吸收点击；
+      - 真正的硬件级全局点击感知必须依赖 Manifest §2 / §4 锁定的技术栈——Linux 内核 `/dev/input/event*`（`evdev`）。用户若将当前账号加入 `input` 用户组，`vok-infra` 内核级按键流即可毫秒级感知全局任意位置物理点击。
+- **状态**：Active（2026-09-18 确立，2026-09-19 清退停驻猜想并固化底层机理）。
+
+---
+
+### §24 基于 PolicyKit (Polkit) 原生授权与 Linux 内核 evdev 硬件级全盲区鼠标点击感知规范 (Polkit & Evdev Hardware Mouse Click Policy)
+
+- **背景与痛点**：
+  在 Ubuntu GNOME Wayland 环境下，由于 Mutter 合成器将左侧 Ubuntu Dock (`x < 132`) 作为私有 Chrome Actor 隔离，当用户点击两枚图标之间的空白死区时，合成器内部吸收事件，不切换窗口亦不派发 X11 信号。在未获得 Linux 内核 `/dev/input` 权限的前提下，X11 客户端在机制上无法获悉该物理点击。若要求用户手动开黑底白字终端敲命令行进行授权，严重违背专业现代桌面 GUI 应用的优雅产品体验。
+- **最终方案**：
+  1. **遵循业界 Polkit (PolicyKit) 原生授权规范与 uaccess 机制 (`SystemPermission`)**：
+     - 在 `vok-infra::desktop::permission` 封装 `SystemPermission`；
+     - 采用现代 systemd-logind 桌面标准：通过 `pkexec` 执行最小特权配置脚本，写入 `/etc/udev/rules.d/99-vok-input.rules`：
+       `KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"`
+     - 执行 `udevadm control --reload && udevadm trigger --subsystem-match=input`；
+     - 并通过 `setfacl -m u:$USER:r /dev/input/event*` 赋予当前活跃桌面用户直接读取 ACL，**实现零重启、零注销、即刻生效**；
+     - 呼出 GNOME 原生磨砂玻璃安全认证对话框（支持密码输入与指纹识别），应用自身绝不触碰用户密码；
+  2. **Linux 内核物理鼠标按键硬件流监听器 (`EvdevMouseWatcher`)**：
+     - 在 `vok-infra::input` 封装 `EvdevMouseWatcher`，自动枚举扫描系统中所有支持 `Key::BTN_LEFT` 的物理鼠标与触控板设备；
+     - 专用后台工作线程读取微秒级硬件电平事件，当捕获到物理鼠标左键按下（`BTN_LEFT` value=1）时，即刻通过 X11 读取当前指针物理绝对坐标；
+     - 与当前生效工作区 `WorkAreaGeometry` 执行纯几何校验：
+       - 若处于工作区外部（包含 Ubuntu Dock 纯黑空白缝隙、顶栏、多屏盲区）：0 微秒瞬时向 GTK 投递退让信号；
+       - 若处于工作区内部：静默放行，由 GTK 原生卡片与组件处理点击；
+       - 鼠标任意移动与快速晃动：仅产生 `EV_REL` 相对坐标位移，**产生 0 个 `BTN_LEFT` 按键事件，100% 绝对免疫误隐藏**；
+  3. **独立设置窗口 (`SettingsWindow`) 图形化一键授权与状态徽章**：
+     - 在首选项【交互行为】页面新增“硬件级全局输入感知 (Linux 内核 evdev)”专属分组；
+     - 自动检测当前权限状态：若未授权显示“一键授权”高亮操作按钮；点击后在后台异步唤起 Polkit 认证，通过 `async_channel` 在主线程局部 Future 中零卡顿刷新 UI；授权成功后按钮自动隐藏并呈现“✓ 已激活”绿色徽章；
+  4. **双轨外置点击统一流**：
+     - `OverlayWindow` 内部统一将 `OutsideClickWatcher` (XI2) 与 `EvdevMouseWatcher` (evdev) 的触发汇流至同一个 `async_channel`；在透明代理锚点模式下统一挂起，在呼出与隐藏时原子同步启闭。
+- **状态**：Active（2026-09-19 确立）。
+
+---
+
+### §25 突破 Wayland 坐标钳位与触控板轻击 (Tap) 状态机：双轨窗口层级与全按键退让规范 (Wayland Clamp-Bypass & Touchpad Tap Policy)
+
+- **背景与痛点**：
+  在完成 Polkit 授权与 evdev 内核鼠标监听器后，实机测试中点击 Ubuntu Dock 纯空白处依然未能隐藏。且用户提出重大疑问：“日志上显示隐藏，但实际上根本没有隐藏；检测机制都不准；为什么日志总是检测到隐藏？”。
+- **根因精确定位 (Root Cause)**：
+  1. **日志显示隐藏与实机脱节的真凶**：
+     日志中显示的 `【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)，触发自动退出`，系用户在点击 Dock 空白无反应后，切换窗口查看终端日志或向 AI 发送反馈时触发的标准窗口失焦，而非 Dock 点击所触发；用户将后置的窗口切换失焦日志误认为是前置点击的判定结果。
+  2. **Wayland 合成器坐标钳位 (Coordinate Clamping)**：
+     在 GNOME Wayland 下，Ubuntu Dock 为 Mutter 私有 Clutter actor（位于物理屏幕 $x=0..132$ 区域）。当光标移入 Dock 时，Mutter 不会将属于原生 Wayland 界面的指针坐标如实同步至 Xwayland 根窗口，Xwayland 中的 `query_pointer` 坐标停滞在边界处（$x=132$）。此前的外置点击检测仅校验纯几何 `x < wa.x`（即 $132 < 132 \rightarrow \text{false}$），导致即便捕获到了内核物理按键，几何校验仍判定为“处于工作区内”而静默跳过！
+  3. **笔记本触控板轻击 (Touchpad Tap) 事件码盲区**：
+     笔记本触控板的轻击（Tap-to-click）在 Linux 内核 evdev 中并不派发 `BTN_LEFT`（272），而是派发触控电平 `BTN_TOUCH`（330）。此前的监听器仅过滤 `BTN_LEFT`，直接漏掉了触控板轻击操作。
+- **最终方案**：
+  1. **双轨窗口层级反向排除法 (`check_pointer_against_vok`)**：
+     - 在 `WindowAdapter::check_pointer_against_vok(wa, vok_xid)` 中，综合判定：
+       `is_outside = geom_outside || (vok_xid != 0 && child != vok_xid)`；
+     - 彻底打破对 Wayland 坐标同步的依赖：在 Xwayland 窗口树中，Vok Overlay 是唯一的全屏顶级窗口（XID: `0x1800004`）。当光标进入 Ubuntu Dock 时，Xwayland 根窗口下的命中子窗口（`reply.child`）必定为 `0` 或非 Vok 窗口；
+     - 当光标位于 Vok 界面内部时，`reply.child == vok_xid` 且 `geom_outside == false`，严丝合缝免疫；
+  2. **触控板轻击 Tap 状态机与物理多键全覆盖**：
+     - 在 `EvdevMouseWatcher` 内部构建高精度 Tap 状态机：跟踪 `BTN_TOUCH` 按下到抬起的时间差，当 $\Delta t < 250\text{ms}$ 时精确判定为一次物理轻击（Tap）；
+     - 全面覆盖物理鼠标左键、右键、中键及侧键（`BTN_LEFT`, `BTN_RIGHT`, `BTN_MIDDLE`, `BTN_SIDE`, `BTN_EXTRA`）；
+  3. **生命周期原子联动**：
+     - `OverlayWindow::reveal()` 呈现时动态刷新最新的 `vok_xid`，并在 200ms 防抖延迟后原子启用监听；
+     - 每次物理输入捕获与外置决策均输出包含设备、事件码、光标坐标、子窗口 XID 的确凿日志，实现完全透明可观测。
+- **状态**：Active（2026-09-19 确立）。

@@ -60,3 +60,51 @@
 - 启用 GTK 原生 `window.maximize()` 首帧贴合，彻底消除居中留白与短暂未覆盖 bug；
 - `set_skip_taskbar` 移除多余坐标操作，仅保留纯净 `StackMode::ABOVE`；
 - 弱引用可见性防抖守卫与 GSettings 幂等性过滤，实测 `Corners: +132+64 -0+64 -0-0 +132-0` 零缝隙贴合。
+
+### Session 2026-09-17 - 根治“界面抽搐抖动”，确立 Zero-Jitter 无抖动纯净映射规范
+
+- **核心闭环**：
+  1. 深入 GNOME Shell `windowManager.js` 源码，查明 `enable-animations=false` 反而导致 0.01 尺度首帧被渲染并暴力弹爆全屏的系统级缺陷；
+  2. 查明 `OverlayWindow::reveal()` 中 20ms 定时器重复广播 `max_horz/max_vert` 导致 Mutter 触发 `MOVE_RESIZE` 二次重排的抖动根因；
+  3. 彻底精简呼出链路，消除 20ms 定时器与冗余 X11 广播，呼出耗时降至 **4.7ms**，实测界面完全平稳、零抽搐。
+
+### Session 2026-09-17 - 消除 Mutter 动效抖动、尺寸贴合与失焦关闭体验闭环
+
+- 彻底查明 Mutter 窗口动效机理，确立无抖动纯净映射规范（Zero-Jitter Pure Mapping Policy）；
+- 移除 0.01 强制尺寸重排 hacks，消除 20ms 闪烁；
+- 建立 EWMH 双向焦点暂存与精准恢复引擎；
+- 呼出时延降至 4.7ms，全量单元测试与门禁验证通过。
+
+### Session 2026-09-17 - 落地 M2 切片 2.1：前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out)
+
+- **核心闭环**：
+  1. 确立并落盘 `docs/m2_planning.md` 整体技术方案；
+  2. `vok-infra::window` 封装 X11/EWMH `_NET_ACTIVE_WINDOW` 查询与恢复接口，单测覆盖非法 XID 容错；
+    3. `OverlayWindow` 呼出时智能识别排除自身并暂存前台 XID，`hide()` 时原子触发恢复请求；
+    4. 挂载激活状态通知，设计 `has_been_active` 状态守卫排除映射首帧伪失焦，实机 Toggle 与 xprop 验证焦点 100% 精准归还原应用。
+
+### Session 2026-09-18 - 落地 M2 切片 2.2 硬件直接粘贴与切片 2.3 反向拖出透明代理锚点
+
+- **核心闭环**：
+  1. `vok-infra::input` 封装 `InputInjector`，建立 `/dev/uinput` 与 X11 XTEST 双通道，提供无感硬件击键；
+  2. `vok-app` 联动实现单击/回车直接粘贴流水线，恪守 R7 延时时序守卫（50ms）；
+  3. 查明 Wayland 拖出 Unmap 掐断与失焦时序冲突根因，落地 `vok-proxy-anchor` 全透明代理模式，保持 Surface 存活且视觉完全穿透；
+  4. `StageView` 卡片挂载 `DragSource` 生命周期与多格式复合载荷；
+  5. 门禁测试扩展至 GATE-M2-1~5，67 项自动化测试全部通过。
+
+### Session 2026-09-18 - 落地 M3 前置 4 项核心功能：独立设置窗口、深浅色系统跟随、Esc捕获与多轨失焦隐藏
+
+- **核心闭环**：
+  1. 新建 `crates/vok-app/src/ui/settings_window.rs`，包含快捷键管理、深浅色切换、隐退行为设置与关于四大模块；
+  2. `vok-infra::desktop::tray` 扩展 `VokTray` 接入设置回调，主界面 Header 齿轮点击原子关闭 Overlay 并呈现设置窗口；
+  3. 新建 `crates/vok-app/src/ui/theme.rs` 与 `vok-core::theme`，对接 `adw::StyleManager` 与 `.theme-light` 样式集；
+  4. 主窗口切换为 `PropagationPhase::Capture` 彻底解决 Esc 被 `SearchEntry` 拦截问题；
+  5. 建立工作区 EWMH 自适应与 Super 键 D-Bus 概览监听。
+
+### Session 2026-09-18 - 彻底根除晃动鼠标误退出，落地 XI2 RawButtonPress 全屏物理点击与任务栏沉淀感知闭环 (决策 §23)
+
+- **核心闭环**：
+  1. 定位并铲除表面工程病根：彻底移除 `pointer_leave_time` 与 `EventControllerMotion`，消除把光标移动误当成失焦点击的错误猜想；
+  2. 新增 `OutsideClickWatcher`：通过 `xinput_xi_select_events` 监听 `XI_RawButtonPress`，被动捕获全局物理点击而不破坏指针状态；
+  3. 维系 R3 规则守护：反向拖出代理模式（`is_in_proxy_mode`）自动挂起外部点击检测；
+  4. 自动化集成测试全绿，Release 守护进程常驻就绪。

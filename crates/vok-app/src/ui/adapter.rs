@@ -22,9 +22,10 @@ impl LayoutAdapter {
             &three_pane_constraints,
         );
 
-        // 设置左（启动台 25%）、中（中转站 50%）、右（剪贴板 25%）的精确宽度约束
+        // 设置左（启动台 25%）、右（剪贴板 25%）的精确宽度约束
+        // 中栏 (中转站 50%) 通过 hexpand(true) 自动扩展填满剩余空间，不设置下限以避免窗口管理器拒绝最大化
         launcher_pane.set_size_request(three_pane.left_width as i32, -1);
-        stage_pane.set_size_request(three_pane.middle_width as i32, -1);
+        stage_pane.set_size_request(-1, -1);
         clipboard_pane.set_size_request(three_pane.right_width as i32, -1);
 
         // 计算卡片防截断垂直高度约束

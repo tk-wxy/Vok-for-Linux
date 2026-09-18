@@ -12,6 +12,7 @@ use tracing::info;
 /// Vok 系统托盘定义
 pub struct VokTray {
     on_toggle: Arc<dyn Fn() + Send + Sync>,
+    on_open_settings: Arc<dyn Fn() + Send + Sync>,
     on_quit: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -32,7 +33,7 @@ impl Tray for VokTray {
     fn tool_tip(&self) -> ksni::ToolTip {
         ksni::ToolTip {
             title: "Vok 效率工作台".into(),
-            description: "按 F12 呼出/收起 | 临时中转站与启动台".into(),
+            description: "呼出/收起 | 临时中转站与启动台".into(),
             ..Default::default()
         }
     }
@@ -44,13 +45,23 @@ impl Tray for VokTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let toggle = self.on_toggle.clone();
+        let open_settings = self.on_open_settings.clone();
         let quit = self.on_quit.clone();
 
         vec![
             StandardItem {
-                label: "🚀 呼出 / 收起工作台 (F12)".into(),
+                label: "🚀 呼出 / 收起工作台".into(),
                 activate: Box::new(move |_| {
                     toggle();
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "⚙ 偏好设置...".into(),
+                activate: Box::new(move |_| {
+                    info!("【托盘菜单】用户点击偏好设置");
+                    open_settings();
                 }),
                 ..Default::default()
             }
@@ -79,10 +90,12 @@ impl VokTray {
     /// 启动系统托盘常驻后台守护服务
     pub fn start(
         on_toggle: impl Fn() + Send + Sync + 'static,
+        on_open_settings: impl Fn() + Send + Sync + 'static,
         on_quit: impl Fn() + Send + Sync + 'static,
     ) -> Result<TrayHandle, Box<dyn std::error::Error + Send + Sync>> {
         let tray = Self {
             on_toggle: Arc::new(on_toggle),
+            on_open_settings: Arc::new(on_open_settings),
             on_quit: Arc::new(on_quit),
         };
         let handle = tray.assume_sni_available(true).spawn()?;

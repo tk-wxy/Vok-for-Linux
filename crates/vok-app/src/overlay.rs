@@ -8,19 +8,22 @@ use gtk4::glib::translate::IntoGlib;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, EventControllerKey, GestureClick, Label,
-    Orientation,
+    Application, ApplicationWindow, Box as GtkBox, EventControllerKey,
+    Label, Orientation,
 };
-use tracing::{debug, info};
+
+use tracing::{debug, info, warn};
+
 use vok_core::generation::GenerationId;
 use vok_core::hotkey::HotkeyConfig;
 use vok_infra::desktop::ThumbnailWorker;
 use vok_infra::storage::StorageClient;
 use vok_infra::window::WorkAreaGeometry;
 
-use crate::ui::{apply_theme, HeaderComponent, SettingsPopover, ThreePaneContainer};
+use crate::ui::{apply_theme, HeaderComponent, ThreePaneContainer};
 
 type DismissCallback = Box<dyn Fn()>;
+type OpenSettingsCallback = Box<dyn Fn()>;
 
 /// 全屏半透明工作台主窗口
 pub struct OverlayWindow {
@@ -29,15 +32,22 @@ pub struct OverlayWindow {
     header: Rc<HeaderComponent>,
     three_pane: Rc<ThreePaneContainer>,
     footer_label: Label,
-    _settings_popover: Rc<SettingsPopover>,
+    geom: Rc<Cell<WorkAreaGeometry>>,
+    current_hotkey: Rc<RefCell<HotkeyConfig>>,
     on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
+    on_open_settings: Rc<RefCell<Option<OpenSettingsCallback>>>,
     previous_active_window: Rc<Cell<Option<u32>>>,
-    has_been_active: Rc<Cell<bool>>,
+    reveal_time: Rc<Cell<std::time::Instant>>,
     is_in_proxy_mode: Rc<Cell<bool>>,
+    has_gained_focus: Rc<Cell<bool>>,
+    outside_click_watcher: Option<Rc<vok_infra::OutsideClickWatcher>>,
+    outside_tx: async_channel::Sender<()>,
+    evdev_mouse_watcher: RefCell<Option<Rc<vok_infra::EvdevMouseWatcher>>>,
 }
 
+
 impl OverlayWindow {
-    /// 构建全屏避让任务栏的三栏工作台主窗口
+    /// 构建全屏半透明工作台并初始化子组件
     pub fn new(
         app: &Application,
         geom: WorkAreaGeometry,
@@ -49,7 +59,7 @@ impl OverlayWindow {
             let monitors = display.monitors();
             if let Some(monitor) = monitors.item(0).and_downcast::<gtk4::gdk::Monitor>() {
                 let rect = monitor.geometry();
-                let scale = monitor.scale_factor().max(1);
+                let scale = monitor.scale_factor();
                 info!(
                     "检测到主显示器: 逻辑矩形 {}x{}+{}+{}, 缩放比={}, 原始系统工作区: {}",
                     rect.width(),
@@ -86,10 +96,13 @@ impl OverlayWindow {
             (geom.width, geom.height)
         };
 
+        let geom = Rc::new(Cell::new(geom));
+
         let window = ApplicationWindow::builder()
             .application(app)
             .title("Vok Overlay")
             .decorated(false)
+            .visible(false)
             .default_width(logical_width as i32)
             .default_height(logical_height as i32)
             .build();
@@ -98,7 +111,7 @@ impl OverlayWindow {
         window.maximize();
         window.add_css_class("vok-window");
 
-        // 绑定 map 信号：在窗口每次映射时确保权威注入 SKIP_TASKBAR, ABOVE 和 MAXIMIZED
+        // 绑定 map 信号：在窗口每次映射时确保权威注入 SKIP_TASKBAR 和 MAXIMIZED
         window.connect_map(|_| {
             vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
         });
@@ -128,16 +141,23 @@ impl OverlayWindow {
         };
         let current_hotkey = Rc::new(RefCell::new(initial_hotkey));
 
-        // 3.1 挂载设置 Popover 面板
-        let settings_popover = Rc::new(SettingsPopover::new(storage.clone(), header.settings_btn()));
+        let on_dismiss: Rc<RefCell<Option<DismissCallback>>> = Rc::new(RefCell::new(None));
+        let on_open_settings: Rc<RefCell<Option<OpenSettingsCallback>>> = Rc::new(RefCell::new(None));
+
+        // 3.1 挂载右上角设置齿轮按钮：隐退工作台并唤起独立首选项窗口
         {
-            let popover_clone = settings_popover.clone();
+            let on_dismiss_for_settings = on_dismiss.clone();
+            let on_open_settings_clone = on_open_settings.clone();
             header.settings_btn().connect_clicked(move |_| {
-                popover_clone.popup();
+                info!("【设置入口】用户点击 Header 设置按钮，隐退工作台并唤起独立首选项窗口");
+                if let Some(cb) = on_dismiss_for_settings.borrow().as_ref() {
+                    cb();
+                }
+                if let Some(cb) = on_open_settings_clone.borrow().as_ref() {
+                    cb();
+                }
             });
         }
-
-        let on_dismiss: Rc<RefCell<Option<DismissCallback>>> = Rc::new(RefCell::new(None));
 
         // 4. 水平 1:2:1 三栏 (启动台 25% : 中转站 50% : 剪贴板 25%)
         let three_pane = Rc::new(ThreePaneContainer::new(
@@ -173,20 +193,6 @@ impl OverlayWindow {
             .build();
         root_box.append(&footer_label);
 
-        // 联动快捷键变更：实时刷新 footer 提示与当前比对按键
-        {
-            let footer_label_clone = footer_label.clone();
-            let current_hotkey_clone = current_hotkey.clone();
-            settings_popover.set_on_hotkey_changed(move |new_config| {
-                let display = new_config.to_display_string();
-                footer_label_clone.set_label(&format!(
-                    "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: {} 呼出/关闭, Esc 退出",
-                    logical_width, logical_height, display
-                ));
-                *current_hotkey_clone.borrow_mut() = new_config;
-            });
-        }
-
         window.set_child(Some(&root_box));
 
         three_pane.debug_sizes();
@@ -201,11 +207,13 @@ impl OverlayWindow {
 
         // 7. 注册 Esc / 动态快捷键关闭
         let key_controller = EventControllerKey::new();
+        // 核心加固：设置为 Capture 阶段，抢在 SearchEntry 等子控件前拦截 Escape 键
+        key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let on_dismiss_esc = on_dismiss.clone();
         let current_hotkey_for_key = current_hotkey.clone();
         key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, modifier_state| {
             if keyval == Key::Escape {
-                debug!("用户按下 Esc 键请求退出工作台");
+                debug!("【Esc 键拦截】用户按下 Esc 键请求退出工作台");
                 if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
                     cb();
                 }
@@ -248,42 +256,102 @@ impl OverlayWindow {
         });
         window.add_controller(key_controller);
 
-        let is_in_proxy_mode = Rc::new(Cell::new(false));
+        // 7.1 搜索框 stop-search 兜底拦截
+        {
+            let on_dismiss_search = on_dismiss.clone();
+            header.search_entry().connect_stop_search(move |_| {
+                debug!("【搜索框】触发 stop-search，退出工作台");
+                if let Some(cb) = on_dismiss_search.borrow().as_ref() {
+                    cb();
+                }
+            });
+        }
 
-        // 8. 点击背景空白处关闭 (代理模式下穿透忽略)
-        let click_gesture = GestureClick::new();
-        let on_dismiss_click = on_dismiss.clone();
-        let is_proxy_for_click = is_in_proxy_mode.clone();
-        click_gesture.connect_released(move |_gesture, _n_press, _x, _y| {
-            if is_proxy_for_click.get() {
-                return;
+        let is_in_proxy_mode = Rc::new(Cell::new(false));
+        let reveal_time = Rc::new(Cell::new(std::time::Instant::now()));
+        let previous_active_window = Rc::new(Cell::new(None));
+
+        // 8. 全局工作区外物理点击监听 (基于 XInput2 RawButtonPress，无侵入，不独占抓取，零按键干扰，零鼠标晃动误触发)
+        let (outside_tx, outside_rx) = async_channel::unbounded::<()>();
+        {
+            let on_dismiss_outside = on_dismiss.clone();
+            let is_proxy_outside = is_in_proxy_mode.clone();
+            let reveal_time_outside = reveal_time.clone();
+            let win_weak = window.downgrade();
+            glib::spawn_future_local(async move {
+                while let Ok(()) = outside_rx.recv().await {
+                    if is_proxy_outside.get() {
+                        continue;
+                    }
+                    if reveal_time_outside.get().elapsed().as_millis() < 200 {
+                        continue;
+                    }
+                    let Some(win) = win_weak.upgrade() else {
+                        break;
+                    };
+                    if !win.is_visible() {
+                        continue;
+                    }
+                    info!("【外置点击隐退】收到外部物理点击事件，执行工作台自动隐藏");
+                    if let Some(cb) = on_dismiss_outside.borrow().as_ref() {
+                        cb();
+                    }
+                }
+            });
+        }
+
+        let outside_tx_xi2 = outside_tx.clone();
+        let outside_click_watcher = match vok_infra::OutsideClickWatcher::start(geom.get(), move || {
+            let _ = outside_tx_xi2.send_blocking(());
+        }) {
+            Ok(w) => Some(Rc::new(w)),
+            Err(e) => {
+                warn!("启动 OutsideClickWatcher 失败: {:?}", e);
+                None
             }
-            debug!("用户点击工作台空白背景请求关闭");
-            if let Some(cb) = on_dismiss_click.borrow().as_ref() {
-                cb();
+        };
+
+        let outside_tx_evdev = outside_tx.clone();
+        let initial_vok_xid = vok_infra::WindowAdapter::get_vok_window_id().unwrap_or(0);
+        let evdev_mouse_watcher = RefCell::new(match vok_infra::EvdevMouseWatcher::start(geom.get(), initial_vok_xid, move || {
+            let _ = outside_tx_evdev.try_send(());
+        }) {
+            Ok(w) => {
+                info!("【内核硬件鼠标监听就绪】成功启动 EvdevMouseWatcher，全屏盲区物理点击零延迟响应");
+                Some(Rc::new(w))
+            }
+            Err(e) => {
+                debug!("未能启动 EvdevMouseWatcher (原因: {:?})，可前往首选项进行规范授权", e);
+                None
             }
         });
-        root_box.add_controller(click_gesture);
+
+
 
         // 9. 失焦自动退出 (Focus-Out Auto-Close)
-        let has_been_active = Rc::new(Cell::new(false));
-        let previous_active_window = Rc::new(Cell::new(None));
+        let has_gained_focus = Rc::new(Cell::new(false));
+
+        // 9.1 挂载窗口 is_active 变更监听 (切换至其它应用时)
         {
             let on_dismiss_focus = on_dismiss.clone();
-            let has_been_active_clone = has_been_active.clone();
             let is_proxy_for_focus = is_in_proxy_mode.clone();
+            let reveal_time_focus = reveal_time.clone();
+            let has_gained_focus_notify = has_gained_focus.clone();
             window.connect_is_active_notify(move |win| {
                 let active = win.is_active();
                 debug!("OverlayWindow is_active 状态变更: {}", active);
                 if active {
-                    has_been_active_clone.set(true);
-                } else if has_been_active_clone.get() && win.is_visible() {
+                    has_gained_focus_notify.set(true);
+                    info!("【入焦成功】OverlayWindow 已获得前台活动焦点");
+                } else if has_gained_focus_notify.get() && win.is_visible() {
                     // 规则 R3 守卫：处于反向拖出透明代理锚点模式时，指针移动至外部窗口引起的失焦绝对不能触发退出
                     if is_proxy_for_focus.get() {
                         debug!("【失焦守卫】当前正处于反向拖出透明代理锚点模式 (R3)，忽略失焦通知");
                         return;
                     }
-                    has_been_active_clone.set(false);
+                    if reveal_time_focus.get().elapsed().as_millis() < 250 {
+                        return;
+                    }
                     info!("【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)，触发自动退出");
                     if let Some(cb) = on_dismiss_focus.borrow().as_ref() {
                         cb();
@@ -292,23 +360,194 @@ impl OverlayWindow {
             });
         }
 
+        // 9.2 毫秒级兜底检测：感知 GNOME 概览、失焦与其它应用激活
+        {
+            let win_weak = window.downgrade();
+            let is_proxy_timer = is_in_proxy_mode.clone();
+            let on_dismiss_timer = on_dismiss.clone();
+            let reveal_time_timer = reveal_time.clone();
+            let my_xid_cell = Rc::new(Cell::new(None));
+            let has_gained_focus_timer = has_gained_focus.clone();
+            let geom_timer = geom.clone();
+
+            glib::timeout_add_local(std::time::Duration::from_millis(30), move || {
+                let Some(win) = win_weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if !win.is_visible() {
+                    my_xid_cell.set(None);
+                    return glib::ControlFlow::Continue;
+                }
+                if is_proxy_timer.get() {
+                    return glib::ControlFlow::Continue;
+                }
+                let elapsed_ms = reveal_time_timer.get().elapsed().as_millis();
+                if elapsed_ms < 250 {
+                    return glib::ControlFlow::Continue;
+                }
+
+                // 检查 0: GNOME Shell Overview (如按下 Super / 开始键呼出系统全览)
+                if vok_infra::WindowAdapter::is_gnome_overview_active() {
+                    info!("【失焦感知】检测到系统进入 GNOME Shell 概览 (OverviewActive == true)，触发自动退出");
+                    if let Some(cb) = on_dismiss_timer.borrow().as_ref() {
+                        cb();
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+
+                // 检查 1: GTK 自身 is_active 状态 (仅在曾经成功入焦后生效)
+                if has_gained_focus_timer.get() && !win.is_active() {
+                    info!("【失焦感知】轮询检测到窗口失去活动焦点 (GTK is_active == false)，触发自动退出");
+                    if let Some(cb) = on_dismiss_timer.borrow().as_ref() {
+                        cb();
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+
+                // 检查 2: 前台活动窗口追踪 (Alt+Tab, Super键, 点击任务栏唤起软件, 呼出其它应用)
+                if my_xid_cell.get().is_none() {
+                    if let Some(id) = vok_infra::WindowAdapter::get_vok_window_id() {
+                        my_xid_cell.set(Some(id));
+                    }
+                }
+                if let Some(my_xid) = my_xid_cell.get() {
+                    let active_opt = vok_infra::WindowAdapter::get_active_window_id();
+                    if active_opt == Some(my_xid) {
+                        // 确凿观测到本窗口已是前台活动窗口
+                        has_gained_focus_timer.set(true);
+                    } else if has_gained_focus_timer.get() {
+                        // 确凿观测到曾经入焦，但现在前台活动窗口已变为其它窗口或桌面 (active_opt != Some(my_xid))
+                        let title = active_opt
+                            .and_then(vok_infra::WindowAdapter::get_window_title)
+                            .unwrap_or_else(|| "桌面/Wayland应用/GNOME Shell".to_string());
+                        info!("【失焦感知】检测到前台活动窗口已切换至 [{}] (!= 本窗口 0x{:x})，触发自动退出", title, my_xid);
+                        if let Some(cb) = on_dismiss_timer.borrow().as_ref() {
+                            cb();
+                        }
+                        return glib::ControlFlow::Continue;
+                    }
+                }
+
+                // 检查 3: 工作区外部物理按键按下检测 (检测到任何外置硬件按键即刻隐退)
+                let current_wa = geom_timer.get();
+                if vok_infra::WindowAdapter::is_pointer_clicking_outside(current_wa) {
+                    info!("【外置点击隐退】检测到工作区外部物理按键按下，触发自动隐藏");
+                    if let Some(cb) = on_dismiss_timer.borrow().as_ref() {
+                        cb();
+                    }
+                    return glib::ControlFlow::Continue;
+                }
+
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // 9.3 订阅 GNOME Shell Overview 概览信号 (按下 Super 键时 0ms 瞬时响应)
+        if let Ok(dbus_conn) = gtk4::gio::bus_get_sync(gtk4::gio::BusType::Session, gtk4::gio::Cancellable::NONE) {
+            let on_dismiss_dbus = on_dismiss.clone();
+            let is_proxy_dbus = is_in_proxy_mode.clone();
+            let win_weak_dbus = window.downgrade();
+            dbus_conn.signal_subscribe(
+                Some("org.gnome.Shell"),
+                Some("org.freedesktop.DBus.Properties"),
+                Some("PropertiesChanged"),
+                Some("/org/gnome/Shell"),
+                None,
+                gtk4::gio::DBusSignalFlags::NONE,
+                move |_conn, _sender, _path, _iface, _signal, _params| {
+                    if is_proxy_dbus.get() {
+                        return;
+                    }
+                    let Some(win) = win_weak_dbus.upgrade() else {
+                        return;
+                    };
+                    if !win.is_visible() {
+                        return;
+                    }
+                    if vok_infra::WindowAdapter::is_gnome_overview_active() {
+                        info!("【D-Bus 概览感知】收到 org.gnome.Shell 概览激活信号，瞬时触发自动退出");
+                        if let Some(cb) = on_dismiss_dbus.borrow().as_ref() {
+                            cb();
+                        }
+                    }
+                },
+            );
+        }
+
         Self {
             window,
             root_box,
             header,
             three_pane,
             footer_label,
-            _settings_popover: settings_popover,
+            geom,
+            current_hotkey,
             on_dismiss,
+            on_open_settings,
             previous_active_window,
-            has_been_active,
+            reveal_time,
             is_in_proxy_mode,
+            has_gained_focus,
+            outside_click_watcher,
+            outside_tx,
+            evdev_mouse_watcher,
         }
     }
+
+    /// 确保内核硬件级鼠标点击监听已就绪 (若先前未授权但现在已就绪，立即动态挂载)
+    pub fn ensure_evdev_watcher(&self) {
+        if self.evdev_mouse_watcher.borrow().is_some() {
+            return;
+        }
+        if vok_infra::SystemPermission::has_input_permissions() {
+            let outside_tx_evdev = self.outside_tx.clone();
+            let current_geom = self.geom.get();
+            let vok_xid = vok_infra::WindowAdapter::get_vok_window_id().unwrap_or(0);
+            match vok_infra::EvdevMouseWatcher::start(current_geom, vok_xid, move || {
+                let _ = outside_tx_evdev.try_send(());
+            }) {
+                Ok(w) => {
+                    info!("【内核硬件鼠标监听就绪】动态接入 EvdevMouseWatcher，全屏盲区物理点击零延迟响应");
+                    *self.evdev_mouse_watcher.borrow_mut() = Some(Rc::new(w));
+                }
+                Err(e) => {
+                    warn!("动态启动 EvdevMouseWatcher 失败: {:?}", e);
+                }
+            }
+        }
+    }
+
 
     /// 设置工作台关闭回调 (Esc / 点击空白处)
     pub fn set_on_dismiss<F: Fn() + 'static>(&self, callback: F) {
         *self.on_dismiss.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// 设置打开设置窗口回调
+    pub fn set_on_open_settings<F: Fn() + 'static>(&self, callback: F) {
+        *self.on_open_settings.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// 动态刷新深浅色主题样式类
+    pub fn set_theme_dark(&self, is_dark: bool) {
+        if is_dark {
+            self.window.remove_css_class("theme-light");
+            self.root_box.remove_css_class("theme-light");
+        } else {
+            self.window.add_css_class("theme-light");
+            self.root_box.add_css_class("theme-light");
+        }
+    }
+
+    /// 动态刷新底部快捷键提示与窗口内比对键
+    pub fn update_hotkey_display(&self, new_config: HotkeyConfig) {
+        let display = new_config.to_display_string();
+        let geom = self.geom.get();
+        self.footer_label.set_label(&format!(
+            "工作区: {}x{} (已适配 HiDPI 缩放与任务栏避让) | 快捷键: {} 呼出/关闭, Esc 退出",
+            geom.width, geom.height, display
+        ));
+        *self.current_hotkey.borrow_mut() = new_config;
     }
 
     /// 设置中转站外部拖拽丢入完成回调
@@ -334,6 +573,12 @@ impl OverlayWindow {
         }
         info!("【透明代理锚点】激活 vok-proxy-anchor 模式，Surface 保持存活，界面全透明穿透 (规则 R3)");
         self.is_in_proxy_mode.set(true);
+        if let Some(watcher) = self.outside_click_watcher.as_ref() {
+            watcher.set_enabled(false);
+        }
+        if let Some(watcher) = self.evdev_mouse_watcher.borrow().as_ref() {
+            watcher.set_enabled(false);
+        }
         self.window.add_css_class("vok-proxy-anchor");
         self.root_box.add_css_class("vok-proxy-anchor");
         self.header.widget().set_visible(false);
@@ -348,6 +593,14 @@ impl OverlayWindow {
         }
         info!("【透明代理锚点】退出 vok-proxy-anchor 模式，恢复标准视觉形态");
         self.is_in_proxy_mode.set(false);
+        if self.window.is_visible() {
+            if let Some(watcher) = self.outside_click_watcher.as_ref() {
+                watcher.set_enabled(true);
+            }
+            if let Some(watcher) = self.evdev_mouse_watcher.borrow().as_ref() {
+                watcher.set_enabled(true);
+            }
+        }
         self.window.remove_css_class("vok-proxy-anchor");
         self.root_box.remove_css_class("vok-proxy-anchor");
         self.header.widget().set_visible(true);
@@ -363,12 +616,78 @@ impl OverlayWindow {
     /// 呈现窗口并默认聚焦于顶部搜索框，同时暂存原前台活动窗口
     pub fn reveal(&self, gen: GenerationId) {
         self.exit_proxy_anchor_mode();
+        self.reveal_time.set(std::time::Instant::now());
+        self.has_gained_focus.set(false);
 
-        // 呼出前暂存当前活动窗口 (原前台应用)
+        // 1. 动态刷新最新的真实系统工作区几何
+        let current_geom = vok_infra::WindowAdapter::get_work_area();
+        self.geom.set(current_geom);
+
+        // 动态检测并确保 Evdev 硬件鼠标监听已就绪 (若系统权限已变更，即刻热挂载)
+        self.ensure_evdev_watcher();
+
+        // 刷新并激活外置点击探测器
+        if let Some(watcher) = self.outside_click_watcher.as_ref() {
+            watcher.update_workarea(current_geom);
+            let watcher_enable = watcher.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+                watcher_enable.set_enabled(true);
+            });
+        }
+        if let Some(watcher) = self.evdev_mouse_watcher.borrow().as_ref() {
+            watcher.update_workarea(current_geom);
+            if let Some(xid) = vok_infra::WindowAdapter::get_vok_window_id() {
+                watcher.update_vok_xid(xid);
+            }
+            let watcher_enable = watcher.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
+                if let Some(xid) = vok_infra::WindowAdapter::get_vok_window_id() {
+                    watcher_enable.update_vok_xid(xid);
+                }
+                watcher_enable.set_enabled(true);
+            });
+        }
+
+        // 获取主显示器几何与 HiDPI 缩放比，重新应用自适应布局
+        let (logical_width, logical_height) = if let Some(display) = gtk4::gdk::Display::default() {
+            let monitors = display.monitors();
+            if let Some(monitor) = monitors.item(0).and_downcast::<gtk4::gdk::Monitor>() {
+                let rect = monitor.geometry();
+                let scale = monitor.scale_factor();
+                if current_geom.width > rect.width() as u32 && scale > 1 {
+                    let w = (current_geom.width / scale as u32).min(rect.width() as u32);
+                    let h = (current_geom.height / scale as u32).min(rect.height() as u32);
+                    (w, h)
+                } else if current_geom.width > 0 && current_geom.height > 0 {
+                    let w = current_geom.width.min(rect.width() as u32);
+                    let h = current_geom.height.min(rect.height() as u32);
+                    (w, h)
+                } else {
+                    (rect.width() as u32, rect.height() as u32)
+                }
+            } else {
+                (current_geom.width, current_geom.height)
+            }
+        } else {
+            (current_geom.width, current_geom.height)
+        };
+
+        // 2. 动态重新计算三栏几何，确保 100% 严丝合缝
+        let content_width = logical_width.saturating_sub(40);
+        let content_height = logical_height.saturating_sub(134);
+        let (pane_geom, card_geom) = self.three_pane.apply_geometry(content_width, content_height);
+        debug!(
+            "【全屏工作区严合】逻辑尺寸: {}x{} | 三栏左={}px 中={}px 右={}px | 卡片行数={} 单行高={}px",
+            logical_width, logical_height,
+            pane_geom.left_width, pane_geom.middle_width, pane_geom.right_width,
+            card_geom.row_count, card_geom.row_height
+        );
+
+        // 3. 呼出前暂存当前活动窗口 (原前台应用)
         if let Some(xid) = vok_infra::WindowAdapter::get_active_window_id() {
             let is_self = vok_infra::WindowAdapter::get_window_title(xid)
                 .is_some_and(|t| t == "Vok Overlay");
-            if !is_self {
+            if !is_self && xid != 0 {
                 let title = vok_infra::WindowAdapter::get_window_title(xid)
                     .unwrap_or_else(|| "未知应用".to_string());
                 info!("【前台焦点暂存】捕获到前台活动窗口: [0x{:x}] ({})", xid, title);
@@ -376,20 +695,29 @@ impl OverlayWindow {
             }
         }
 
-        self.has_been_active.set(false);
         self.header.set_status(&format!("会话中 [{gen}]"));
         self.window.maximize();
         self.window.set_visible(true);
         self.window.present();
 
+        // 呼出提升至前台并激活
+        vok_infra::WindowAdapter::raise_and_activate_window_by_title("Vok Overlay");
+
         // 呼出即入焦：自动聚焦于搜索框
+        gtk4::prelude::GtkWindowExt::set_focus(&self.window, Some(self.header.search_entry()));
         self.header.search_entry().grab_focus();
     }
 
     /// 隐藏窗口并原子交还原前台窗口焦点
     pub fn hide(&self) {
         self.exit_proxy_anchor_mode();
-        self.has_been_active.set(false);
+        self.has_gained_focus.set(false);
+        if let Some(watcher) = self.outside_click_watcher.as_ref() {
+            watcher.set_enabled(false);
+        }
+        if let Some(watcher) = self.evdev_mouse_watcher.borrow().as_ref() {
+            watcher.set_enabled(false);
+        }
         self.window.set_visible(false);
 
         // 原子交还原前台焦点
@@ -399,6 +727,7 @@ impl OverlayWindow {
             }
         }
     }
+
 
     /// 获取当前暂存的原前台窗口 XID (若存在)
     pub fn previous_active_window(&self) -> Option<u32> {
