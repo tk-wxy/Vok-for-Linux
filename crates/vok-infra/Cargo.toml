@@ -11,7 +11,7 @@ tracing.workspace = true
 thiserror.workspace = true
 crossbeam-channel.workspace = true
 evdev = "0.12"
-x11rb = "0.14"
+x11rb = { version = "0.14", features = ["xtest"] }
 rusqlite.workspace = true
 zbus.workspace = true
 image.workspace = true

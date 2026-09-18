@@ -178,6 +178,36 @@ pub fn copy_path_to_clipboard(path: &Path) {
     }
 }
 
+/// 直接粘贴到原前台窗口 (遵循 R7 铁律与双引擎策略)
+/// 1. 将文件物理路径写入系统剪贴板；
+/// 2. 隐藏工作台窗口并原子交还原前台焦点；
+/// 3. 在 50ms 延时后通过 InputInjector 注入 Ctrl+V 硬件击键。
+pub fn direct_paste_item_to_foreground(
+    path: &Path,
+    on_dismiss: Option<&dyn Fn()>,
+) {
+    let path_str = path.to_string_lossy().to_string();
+    if let Some(display) = Display::default() {
+        display.clipboard().set_text(&path_str);
+        info!("【直接粘贴流水线】路径已写入剪贴板: {}", path_str);
+    }
+
+    // 立即触发退出隐藏（将触发 OverlayWindow::hide() 及其前台焦点原子返还）
+    if let Some(dismiss) = on_dismiss {
+        dismiss();
+    }
+
+    // 严格遵循 R7 铁律：必须在窗口完全隐藏且失焦确认后执行虚拟按键注入
+    gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+        let mut injector = vok_infra::InputInjector::new();
+        if let Err(e) = injector.inject_paste() {
+            warn!("【直接粘贴】注入 Ctrl+V 失败: {:?}", e);
+        } else {
+            info!("【直接粘贴完成】已向原前台应用成功注入 Ctrl+V");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

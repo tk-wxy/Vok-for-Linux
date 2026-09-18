@@ -20,6 +20,7 @@ use super::actions;
 use super::model::StageObject;
 
 type DismissCallback = Box<dyn Fn()>;
+type DragCallback = Box<dyn Fn()>;
 
 /// 中转站 2 列网格视图组件 (具备虚拟滚动、双向拖拽与异步缩略图渲染)
 #[derive(Clone)]
@@ -33,6 +34,8 @@ pub struct StageView {
     thumbnail_worker: Arc<ThumbnailWorker>,
     #[allow(dead_code)]
     on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
+    on_drag_begin: Rc<RefCell<Option<DragCallback>>>,
+    on_drag_end: Rc<RefCell<Option<DragCallback>>>,
 }
 
 impl StageView {
@@ -52,6 +55,10 @@ impl StageView {
         let store_setup = store.clone();
         let storage_setup = storage.clone();
         let on_dismiss_setup = on_dismiss.clone();
+        let on_drag_begin: Rc<RefCell<Option<DragCallback>>> = Rc::new(RefCell::new(None));
+        let on_drag_end: Rc<RefCell<Option<DragCallback>>> = Rc::new(RefCell::new(None));
+        let on_drag_begin_setup = on_drag_begin.clone();
+        let on_drag_end_setup = on_drag_end.clone();
 
         // 创建异步缩略图投递通道 (后台线程发送，GTK 主线程安全消费)
         let (thumb_tx, thumb_rx) = async_channel::unbounded::<(i64, PathBuf)>();
@@ -154,7 +161,7 @@ impl StageView {
             card_box.append(&preview_box);
             card_box.append(&meta_box);
 
-            // 挂载反向拖出控制器 (GtkDragSource)
+            // 挂载反向拖出控制器 (GtkDragSource - 遵循 R3 透明代理锚点铁律)
             let drag_source = DragSource::builder()
                 .actions(DragAction::COPY)
                 .build();
@@ -165,8 +172,37 @@ impl StageView {
                 let source_path = obj.item().path;
                 let file = gio::File::for_path(&source_path);
                 let file_list = FileList::from_array(&[file]);
-                Some(ContentProvider::for_value(&file_list.to_value()))
+                let file_provider = ContentProvider::for_value(&file_list.to_value());
+                let text_provider = ContentProvider::for_value(&source_path.to_string_lossy().to_string().to_value());
+                Some(ContentProvider::new_union(&[file_provider, text_provider]))
             });
+
+            let on_drag_begin_card = on_drag_begin_setup.clone();
+            let on_drag_end_card1 = on_drag_end_setup.clone();
+            let on_drag_end_card2 = on_drag_end_setup.clone();
+
+            drag_source.connect_drag_begin(move |_source, _drag| {
+                info!("【反向拖出起手】GtkDragSource 触发 drag-begin，激活透明代理锚点 (规则 R3)");
+                if let Some(cb) = on_drag_begin_card.borrow().as_ref() {
+                    cb();
+                }
+            });
+
+            drag_source.connect_drag_end(move |_source, _drag, _delete_data| {
+                info!("【反向拖出结束】GtkDragSource 触发 drag-end，退出透明代理并隐退");
+                if let Some(cb) = on_drag_end_card1.borrow().as_ref() {
+                    cb();
+                }
+            });
+
+            drag_source.connect_drag_cancel(move |_source, _drag, reason| {
+                info!("【反向拖出取消】GtkDragSource 触发 drag-cancel (原因: {:?})，退出透明代理并隐退", reason);
+                if let Some(cb) = on_drag_end_card2.borrow().as_ref() {
+                    cb();
+                }
+                false
+            });
+
             card_box.add_controller(drag_source);
 
             // 挂载右键上下文菜单手势
@@ -271,23 +307,21 @@ impl StageView {
             .min_columns(2)
             .max_columns(2)
             .enable_rubberband(false)
-            .single_click_activate(false)
+            .single_click_activate(true)
             .css_classes(["vok-stage-grid"])
             .build();
 
-        // 3. 双击/回车激活打开文件
+        // 3. 左键单击/回车激活直接粘贴至原前台光标处
         {
             let store_clone = store.clone();
             let on_dismiss_clone = on_dismiss.clone();
             grid_view.connect_activate(move |_view, position| {
                 if let Some(obj) = store_clone.item(position).and_downcast::<StageObject>() {
                     let item = obj.item();
-                    info!("【中转站激活】双击打开文件: {:?}", item.path);
-                    if let Err(e) = actions::open_item(&item.path) {
-                        error!("打开文件失败: {}", e);
-                    } else if let Some(cb) = on_dismiss_clone.borrow().as_ref() {
-                        cb();
-                    }
+                    info!("【中转站激活】直接粘贴文件至原前台: {:?}", item.path);
+                    let dismiss_ref = on_dismiss_clone.borrow();
+                    let dismiss_fn = dismiss_ref.as_ref().map(|b| &**b as &dyn Fn());
+                    actions::direct_paste_item_to_foreground(&item.path, dismiss_fn);
                 }
             });
         }
@@ -313,6 +347,8 @@ impl StageView {
             storage,
             thumbnail_worker,
             on_dismiss,
+            on_drag_begin,
+            on_drag_end,
         };
 
         // 载入持久化数据
@@ -328,6 +364,16 @@ impl StageView {
     #[allow(dead_code)]
     pub fn store(&self) -> &gio::ListStore {
         &self.store
+    }
+
+    /// 设置反向拖出起手回调 (进入透明代理锚点)
+    pub fn set_on_drag_begin<F: Fn() + 'static>(&self, callback: F) {
+        *self.on_drag_begin.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// 设置反向拖出结束/取消回调 (退出透明代理并安全隐退)
+    pub fn set_on_drag_end<F: Fn() + 'static>(&self, callback: F) {
+        *self.on_drag_end.borrow_mut() = Some(Box::new(callback));
     }
 
     /// 从持久化数据库载入全部中转站文件 (置顶优先排布)
@@ -448,7 +494,21 @@ impl StageView {
             .margin_end(6)
             .build();
 
-        // 菜单项 1: 置顶 / 取消置顶
+        // 菜单项 1: 直接粘贴至原前台
+        let btn_paste = Button::builder().label("⚡ 直接粘贴 (Enter)").has_frame(false).build();
+        {
+            let path = item.path.clone();
+            let pop_clone = popover.clone();
+            let on_dismiss_clone = on_dismiss.clone();
+            btn_paste.connect_clicked(move |_| {
+                pop_clone.popdown();
+                let dismiss_ref = on_dismiss_clone.borrow();
+                let dismiss_fn = dismiss_ref.as_ref().map(|b| &**b as &dyn Fn());
+                actions::direct_paste_item_to_foreground(&path, dismiss_fn);
+            });
+        }
+
+        // 菜单项 2: 置顶 / 取消置顶
         let pin_label = if item.pinned {
             "📌 取消置顶"
         } else {
@@ -536,6 +596,7 @@ impl StageView {
             });
         }
 
+        menu_box.append(&btn_paste);
         menu_box.append(&btn_pin);
         menu_box.append(&btn_open);
         menu_box.append(&btn_folder);

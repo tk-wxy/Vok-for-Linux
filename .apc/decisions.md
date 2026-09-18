@@ -20,6 +20,7 @@
 - §14 **GNOME Mutter 窗口类型 (NORMAL vs UTILITY) 约束与最大化首帧贴合规范 (Zero-Twitch Geometry Policy)** — 根治缩放抽搐与全屏未覆盖 bug，原生最大化首帧贴合。
 - §15 **GNOME Mutter 动效机制与无抖动纯净映射规范 (Zero-Jitter Pure Mapping Policy)** — 根治 0.01 缩放抽搐与 20ms 二次重排抖动，实现 4.7ms 极速稳定呼出。
 - §16 **EWMH 双向前台焦点暂存与原子精准返还引擎、失焦自动退出 (Focus-Out) 与窗口防窃取绕行规范** — 呼出前毫秒级读取活动 XID，关闭原子交还焦点，点击外部平滑自动退让。
+- §17 **基于 /dev/uinput 与 X11 XTEST 双引擎的硬件直接粘贴 (R7) 与反向拖出透明代理锚点保持 (R3)** — 攻克 Wayland 拖出注销掐断会话缺陷，建立 R7 延时时序保护与复合载荷拖出闭环。
 
 ---
 
@@ -284,7 +285,31 @@
      - 挂载 `window.connect_is_active_notify` 监听窗口顶级激活状态；
      - 引入 `has_been_active` 状态守卫，严格要求经历过 `active == true -> active == false` 且当前窗口仍处于 `is_visible()` 时方才触发，彻底杜绝映射首帧阶段的误触发；
      - 经确认，窗口内 Popover（设置面板、卡片右键菜单）由于共享同一 GdkSurface，操作时不会导致 `is_active` 翻转，避免了内部操作被误退出的缺陷；
-  3. **单元测试与门禁固化**：
-     - 建立 `tests/m2_gate_test.rs`，验证焦点暂存/恢复调用容错、非法 XID (0) 安全 No-Op，以及 `SessionEvent::FocusLost` 的代次隔离保护。
+   3. **单元测试与门禁固化**：
+      - 建立 `tests/m2_gate_test.rs`，验证焦点暂存/恢复调用容错、非法 XID (0) 安全 No-Op，以及 `SessionEvent::FocusLost` 的代次隔离保护。
 - **状态**：Active（2026-09-17 确立）。
 
+---
+
+### §17 基于 /dev/uinput 与 X11 XTEST 双引擎的硬件直接粘贴 (R7) 与反向拖出透明代理锚点保持 (R3)
+
+- **背景与痛点**：
+  1. **消费单向不可逆**：中转站此前只能“外部拖入”，缺少“单击卡片直接在原光标处自动填充文件路径”的高效消费链路；且在 Linux 环境下，直接模拟击键面临 `/dev/uinput` 权限差异（普通用户通常无写权限）以及跨应用伪造按键被合成器拦截的问题；
+  2. **Wayland Drag-out Unmap 掐断死穴 (规则 R3)**：当用户抓取卡片向外部拖拽时，若隐藏全屏面板，Wayland 合成器会因源 Surface 死亡而立即派发 `cancelled`，强制中断拖拽会话；
+  3. **失焦与拖拽的时序冲突**：鼠标移出向外拖拽时会触发 `is_active == false`，若无保护会误触发失焦隐退，导致拖拽中途被毁。
+- **最终方案**：
+  1. **双引擎按键注入器 (`InputInjector`) 与 R7 时序守卫**：
+     - **优先引擎**：构建 Linux 内核 `/dev/uinput` 虚拟键盘设备（`Vok Virtual Keyboard`），直接发送底层硬件扫描码；
+     - **降级引擎**：无权限时自动降级回退至 X11 `XTest` 协议扩展（`xtest_fake_input`），保障在任意无特权 Linux 桌面下 100% 可用；
+     - **R7 延时守卫**：直接粘贴时依次执行：剪贴板写入 -> 面板隐藏 -> 原前台焦点恢复 -> 50ms 延时注入 Ctrl+V，确保击键 100% 落在原前台光标处；
+  2. **透明代理锚点保持模式 (`vok-proxy-anchor`)**：
+     - 用户拖动卡片（触发 `drag-begin`）时，通知状态机进入 `SessionState::Dragging` 并执行 `enter_proxy_anchor_mode()`；
+     - 挂载 `.vok-proxy-anchor` 将窗口与根容器设为全透明，隐藏 Header、三栏与 Footer，底层桌面完全可见；
+     - 窗口在合成器中**保持 Mapped 存活**，确保 Wayland `wl_data_source` 会话持续有效；
+     - 开启 `is_in_proxy_mode` 守卫，严格忽略拖拽期间外部穿透引发的任何 `FocusLost` 失焦事件；
+     - 拖拽完成或取消（`drag-end` / `drag-cancel`）时退出代理模式，调用 `hide()` 并重置状态；
+  3. **复合载荷与 GtkDragSource 协议增强**：
+     - `ContentProvider::new_union` 同时打包 `gdk::FileList`（文件管理器与桌面）与文本字符串（终端与文本框），最大化外部应用兼容性；
+  4. **门禁验证**：
+     - `m2_gate_test.rs` 增设 GATE-M2-3（注入器与 R7 守卫）、GATE-M2-4（拖拽代理与防掐断状态流转）、GATE-M2-5（复合载荷类型检查），全量通过。
+- **状态**：Active（2026-09-18 确立）。

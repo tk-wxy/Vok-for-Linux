@@ -9,11 +9,22 @@ pub fn apply_theme() {
             background-color: rgba(18, 20, 28, 0.95);
         }
 
+        /* 拖拽反向代理锚点态：保持 Surface 存活但全透明穿透 (规则 R3) */
+        window.vok-window.vok-proxy-anchor {
+            background-color: transparent !important;
+        }
+
         .vok-root-container {
             background-color: rgba(18, 20, 28, 0.95);
             border: none;
             border-radius: 0px;
             padding: 16px 20px;
+        }
+
+        .vok-root-container.vok-proxy-anchor {
+            background-color: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
         }
 
         /* 顶部 Header */

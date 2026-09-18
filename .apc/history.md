@@ -53,3 +53,10 @@
 - SQLite WAL 新增 `app_settings` 表，单写者串行持久化用户专属配置；
 - GNOME `custom-keybinding` 动态热更新，修改即刻生效无需重启进程；
 - 封装 `HotkeyRecorder` 交互组件与 `SettingsPopover` 浮层面板，主窗口内 Toggle 按键比对与底部 Footer 状态文本实时联动同步。
+
+### Session 2026-09-17 - 根除窗口抽搐缩放与全屏未覆盖 bug，确立 Zero-Twitch 规范
+
+- 定位 `UTILITY` 窗口被 Mutter 禁止最大化并居中放置的硬编码陷阱，恢复为标准 `NORMAL` 类型；
+- 启用 GTK 原生 `window.maximize()` 首帧贴合，彻底消除居中留白与短暂未覆盖 bug；
+- `set_skip_taskbar` 移除多余坐标操作，仅保留纯净 `StackMode::ABOVE`；
+- 弱引用可见性防抖守卫与 GSettings 幂等性过滤，实测 `Corners: +132+64 -0+64 -0-0 +132-0` 零缝隙贴合。

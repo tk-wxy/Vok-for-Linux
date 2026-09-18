@@ -90,6 +90,16 @@ impl ThreePaneContainer {
         *self.on_drop.borrow_mut() = Some(Box::new(callback));
     }
 
+    /// 设置反向拖出起手回调 (透传至 StageView)
+    pub fn set_on_drag_begin<F: Fn() + 'static>(&self, callback: F) {
+        self.stage_view.set_on_drag_begin(callback);
+    }
+
+    /// 设置反向拖出结束/取消回调 (透传至 StageView)
+    pub fn set_on_drag_end<F: Fn() + 'static>(&self, callback: F) {
+        self.stage_view.set_on_drag_end(callback);
+    }
+
     /// 应用动态几何宽度分配与垂直高度整除
     pub fn apply_geometry(
         &self,

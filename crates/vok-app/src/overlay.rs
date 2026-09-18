@@ -25,12 +25,15 @@ type DismissCallback = Box<dyn Fn()>;
 /// 全屏半透明工作台主窗口
 pub struct OverlayWindow {
     window: ApplicationWindow,
+    root_box: GtkBox,
     header: Rc<HeaderComponent>,
     three_pane: Rc<ThreePaneContainer>,
+    footer_label: Label,
     _settings_popover: Rc<SettingsPopover>,
     on_dismiss: Rc<RefCell<Option<DismissCallback>>>,
     previous_active_window: Rc<Cell<Option<u32>>>,
     has_been_active: Rc<Cell<bool>>,
+    is_in_proxy_mode: Rc<Cell<bool>>,
 }
 
 impl OverlayWindow {
@@ -245,10 +248,16 @@ impl OverlayWindow {
         });
         window.add_controller(key_controller);
 
-        // 8. 点击背景空白处关闭
+        let is_in_proxy_mode = Rc::new(Cell::new(false));
+
+        // 8. 点击背景空白处关闭 (代理模式下穿透忽略)
         let click_gesture = GestureClick::new();
         let on_dismiss_click = on_dismiss.clone();
+        let is_proxy_for_click = is_in_proxy_mode.clone();
         click_gesture.connect_released(move |_gesture, _n_press, _x, _y| {
+            if is_proxy_for_click.get() {
+                return;
+            }
             debug!("用户点击工作台空白背景请求关闭");
             if let Some(cb) = on_dismiss_click.borrow().as_ref() {
                 cb();
@@ -262,12 +271,18 @@ impl OverlayWindow {
         {
             let on_dismiss_focus = on_dismiss.clone();
             let has_been_active_clone = has_been_active.clone();
+            let is_proxy_for_focus = is_in_proxy_mode.clone();
             window.connect_is_active_notify(move |win| {
                 let active = win.is_active();
                 debug!("OverlayWindow is_active 状态变更: {}", active);
                 if active {
                     has_been_active_clone.set(true);
                 } else if has_been_active_clone.get() && win.is_visible() {
+                    // 规则 R3 守卫：处于反向拖出透明代理锚点模式时，指针移动至外部窗口引起的失焦绝对不能触发退出
+                    if is_proxy_for_focus.get() {
+                        debug!("【失焦守卫】当前正处于反向拖出透明代理锚点模式 (R3)，忽略失焦通知");
+                        return;
+                    }
                     has_been_active_clone.set(false);
                     info!("【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)，触发自动退出");
                     if let Some(cb) = on_dismiss_focus.borrow().as_ref() {
@@ -279,12 +294,15 @@ impl OverlayWindow {
 
         Self {
             window,
+            root_box,
             header,
             three_pane,
+            footer_label,
             _settings_popover: settings_popover,
             on_dismiss,
             previous_active_window,
             has_been_active,
+            is_in_proxy_mode,
         }
     }
 
@@ -298,8 +316,54 @@ impl OverlayWindow {
         self.three_pane.set_on_drop(callback);
     }
 
+    /// 设置反向拖出起手回调 (进入透明代理锚点)
+    pub fn set_on_drag_begin<F: Fn() + 'static>(&self, callback: F) {
+        self.three_pane.set_on_drag_begin(callback);
+    }
+
+    /// 设置反向拖出结束/取消回调 (退出透明代理并安全隐退)
+    pub fn set_on_drag_end<F: Fn() + 'static>(&self, callback: F) {
+        self.three_pane.set_on_drag_end(callback);
+    }
+
+    /// 进入透明代理锚点模式 (规则 R3 / 切片 2.3)
+    /// 保持 Surface 存活以维系 Wayland DnD 拖拽会话，同时全透明穿透视觉
+    pub fn enter_proxy_anchor_mode(&self) {
+        if self.is_in_proxy_mode.get() {
+            return;
+        }
+        info!("【透明代理锚点】激活 vok-proxy-anchor 模式，Surface 保持存活，界面全透明穿透 (规则 R3)");
+        self.is_in_proxy_mode.set(true);
+        self.window.add_css_class("vok-proxy-anchor");
+        self.root_box.add_css_class("vok-proxy-anchor");
+        self.header.widget().set_visible(false);
+        self.three_pane.widget().set_visible(false);
+        self.footer_label.set_visible(false);
+    }
+
+    /// 退出透明代理锚点模式并恢复界面完整形态
+    pub fn exit_proxy_anchor_mode(&self) {
+        if !self.is_in_proxy_mode.get() {
+            return;
+        }
+        info!("【透明代理锚点】退出 vok-proxy-anchor 模式，恢复标准视觉形态");
+        self.is_in_proxy_mode.set(false);
+        self.window.remove_css_class("vok-proxy-anchor");
+        self.root_box.remove_css_class("vok-proxy-anchor");
+        self.header.widget().set_visible(true);
+        self.three_pane.widget().set_visible(true);
+        self.footer_label.set_visible(true);
+    }
+
+    /// 当前是否处于透明代理锚点模式
+    pub fn is_in_proxy_mode(&self) -> bool {
+        self.is_in_proxy_mode.get()
+    }
+
     /// 呈现窗口并默认聚焦于顶部搜索框，同时暂存原前台活动窗口
     pub fn reveal(&self, gen: GenerationId) {
+        self.exit_proxy_anchor_mode();
+
         // 呼出前暂存当前活动窗口 (原前台应用)
         if let Some(xid) = vok_infra::WindowAdapter::get_active_window_id() {
             let is_self = vok_infra::WindowAdapter::get_window_title(xid)
@@ -324,6 +388,7 @@ impl OverlayWindow {
 
     /// 隐藏窗口并原子交还原前台窗口焦点
     pub fn hide(&self) {
+        self.exit_proxy_anchor_mode();
         self.has_been_active.set(false);
         self.window.set_visible(false);
 

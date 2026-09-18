@@ -139,6 +139,35 @@ impl VokApp {
                 });
             }
 
+            // 5.1 绑定反向拖出开始行为 (进入透明代理锚点，保持 Surface 存活，符合 R3 铁律)
+            {
+                let sm_clone = state_machine.clone();
+                let overlay_clone = overlay.clone();
+                overlay.set_on_drag_begin(move || {
+                    let gen = sm_clone.borrow().current_generation();
+                    let action = sm_clone.borrow_mut().handle_event(SessionEvent::DragStarted(gen));
+                    if matches!(action, SessionAction::KeepProxyAnchor(_)) {
+                        overlay_clone.enter_proxy_anchor_mode();
+                        info!("【反向拖出】会话 [{}] 进入透明代理锚点模式", gen);
+                    }
+                });
+            }
+
+            // 5.2 绑定反向拖出结束/取消行为 (退出透明代理并安全隐退)
+            {
+                let sm_clone = state_machine.clone();
+                let overlay_clone = overlay.clone();
+                overlay.set_on_drag_end(move || {
+                    let gen = sm_clone.borrow().current_generation();
+                    let action = sm_clone.borrow_mut().handle_event(SessionEvent::DragEnded(gen));
+                    if matches!(action, SessionAction::Hide(_)) {
+                        overlay_clone.hide();
+                        sm_clone.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                        info!("【反向拖出完成】会话 [{}] 代理模式安全退出并隐退", gen);
+                    }
+                });
+            }
+
             // 6. 建立后台按键事件通道与 GTK Main Loop 调度桥梁
             let (async_tx, async_rx) = async_channel::unbounded::<HotkeyEvent>();
             let event_rx_clone = event_rx.clone();
