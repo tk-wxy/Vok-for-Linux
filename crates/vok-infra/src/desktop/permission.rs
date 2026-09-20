@@ -6,38 +6,63 @@ use tracing::{info, warn};
 pub struct SystemPermission;
 
 impl SystemPermission {
-    /// 诊断当前用户是否具备 Linux 内核输入设备 (/dev/input/event*) 读取权限
+    /// 诊断当前用户是否具备 Linux 内核所有键盘输入设备 (/dev/input/event*) 读取权限
     pub fn has_input_permissions() -> bool {
+        // 1. 优先精细化检查 /proc/bus/input/devices 中所有活跃键盘设备
+        if let Ok(content) = fs::read_to_string("/proc/bus/input/devices") {
+            let mut found_any_kbd = false;
+            for line in content.lines() {
+                if line.starts_with("H: Handlers=") && line.contains("kbd") {
+                    for token in line["H: Handlers=".len()..].split_whitespace() {
+                        if token.starts_with("event") {
+                            found_any_kbd = true;
+                            let dev_path = format!("/dev/input/{}", token);
+                            if fs::File::open(&dev_path).is_err() {
+                                // 发现存在未授权的物理键盘设备 (如蓝牙 UHID 键盘)
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            if found_any_kbd {
+                return true;
+            }
+        }
+
+        // 2. 兜底检查：若无法读取 /proc，则检查 /dev/input 下所有 event 设备
         let Ok(entries) = fs::read_dir("/dev/input") else {
             return false;
         };
 
+        let mut count = 0;
         for entry in entries.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
             if file_name.starts_with("event") {
-                if let Ok(file) = fs::File::open(entry.path()) {
-                    drop(file);
-                    return true;
+                count += 1;
+                if fs::File::open(entry.path()).is_err() {
+                    return false;
                 }
             }
         }
-        false
+        count > 0
     }
 
     /// 规范调起 GNOME / Polkit 原生系统安全认证弹窗，一键配置 uaccess 规则
     /// 
-    /// 1. 采用现代桌面推荐的 `TAG+="uaccess"` 规则写入 `/etc/udev/rules.d/99-vok-input.rules`
-    /// 2. 即刻通过 `udevadm` 刷新规则并触发 input 匹配
-    /// 3. 为当前登录用户附加直接读取 ACL（`setfacl`），实现零重启、零注销、即刻生效
+    /// 1. 采用早于 71-seat.rules 的 `70-vok-input.rules` 赋予 `TAG+="seat", ENV{ID_SEAT}="seat0"`
+    /// 2. 同时添加 `TAG+="uaccess"`, `MODE="0660"`, `GROUP="input"` 规避蓝牙 UHID 缺失 seat 陷阱
+    /// 3. 将当前用户加入 `input` 用户组作为硬件读取双重保障
+    /// 4. 即刻通过 `udevadm` 刷新规则并为当前用户附加直接读写 ACL（`setfacl`）
     pub fn request_input_permissions() -> Result<bool, String> {
         let username = std::env::var("USER")
             .or_else(|_| std::env::var("LOGNAME"))
             .unwrap_or_else(|_| "lin".to_string());
 
-        info!("【规范权限申请】通过 pkexec 调起系统原生 Polkit 授权对话框，申请配置 input udev 规则...");
+        info!("【规范权限申请】通过 pkexec 调起系统原生 Polkit 授权对话框，申请配置 input udev 规则与权限组...");
 
         let cmd = format!(
-            "echo 'KERNEL==\"event*\", SUBSYSTEM==\"input\", TAG+=\"uaccess\"' > /etc/udev/rules.d/99-vok-input.rules && udevadm control --reload && udevadm trigger --subsystem-match=input && (which setfacl >/dev/null 2>&1 && setfacl -m u:{username}:r /dev/input/event* || true)",
+            "rm -f /etc/udev/rules.d/99-vok-input.rules && echo 'KERNEL==\"event*\", SUBSYSTEM==\"input\", TAG+=\"uaccess\", TAG+=\"seat\", ENV{{ID_SEAT}}=\"seat0\", MODE=\"0660\", GROUP=\"input\"' > /etc/udev/rules.d/70-vok-input.rules && usermod -aG input {username} && udevadm control --reload && udevadm trigger --subsystem-match=input && (which setfacl >/dev/null 2>&1 && setfacl -m u:{username}:rw /dev/input/event* || true)",
             username = username
         );
 

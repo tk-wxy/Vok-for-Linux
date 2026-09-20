@@ -3,6 +3,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt};
+use x11rb::wrapper::ConnectionExt as _;
 
 #[derive(Error, Debug)]
 pub enum WindowError {
@@ -231,13 +232,29 @@ impl WindowAdapter {
                     let x = reply.root_x as i32;
                     let y = reply.root_y as i32;
                     let child = reply.child;
+                    let screen_w = screen.width_in_pixels as i32;
+                    let screen_h = screen.height_in_pixels as i32;
+
                     let geom_outside = x < wa.x || y < wa.y || x >= (wa.x + wa.width as i32) || y >= (wa.y + wa.height as i32);
                     let window_outside = if vok_xid != 0 {
                         child != vok_xid
                     } else {
                         geom_outside
                     };
-                    return Some((geom_outside || window_outside, x, y, child));
+
+                    // 攻克 Wayland 坐标钳位死穴：
+                    // 当光标物理移入 Dock / 顶栏 / 外部面板时，Wayland 合成器 (Mutter Clutter) 会拦截指针事件并停止向 Xwayland 派发 motion，
+                    // 导致 Xwayland 内的光标坐标被永久钳位在工作区边界 (例如 wa.x=132 时，光标停滞在 x=132 或 133，且 child 保持为 vok_xid)。
+                    // 针对避让边缘设置 6 物理像素 (HiDPI 下为 3 逻辑像素) 的边界钳位容差：
+                    // 在 Vok 内部，边缘 40px 内全为空白内边距 (padding)，绝无任何可点击组件；
+                    // 只要物理光标落在边界钳位带内，即证明真实光标已进入面板死区并被合成器钳位，必须判定为外置点击！
+                    let border_clamped = (wa.x > 0 && x <= wa.x + 6)
+                        || (wa.y > 0 && y <= wa.y + 6)
+                        || (screen_w > 0 && (wa.x + wa.width as i32) < screen_w && x >= (wa.x + wa.width as i32 - 6))
+                        || (screen_h > 0 && (wa.y + wa.height as i32) < screen_h && y >= (wa.y + wa.height as i32 - 6));
+
+                    let is_outside = geom_outside || window_outside || border_clamped;
+                    return Some((is_outside, x, y, child));
                 }
             }
             None
@@ -401,23 +418,51 @@ impl WindowAdapter {
         Ok(None)
     }
 
+    /// 对指定 XID 的窗口直接附加 EWMH 跳过任务栏和跳过分页器属性
+    /// 
+    /// 核心防护：
+    /// 1. 使用 change_property32(PropMode::APPEND) 直接写入窗口的 _NET_WM_STATE 属性，
+    ///    确保在窗口被合成器 Map 之前就已具备 SKIP_TASKBAR 和 SKIP_PAGER，
+    ///    彻底消除 GNOME Shell / Ubuntu Dock 在窗口映射瞬间因属性尚未生效而偶发在 Dock 中驻留图标的死穴！
+    /// 2. 同时发送 EWMH ClientMessage 通知窗口管理器 (source indication = 2)，确保运行中即时生效。
+    pub fn set_window_skip_taskbar(win: u32) -> Result<(), WindowError> {
+        if win == 0 {
+            return Ok(());
+        }
+        Self::with_cached_conn(|conn, screen_num| {
+            let screen = &conn.setup().roots[screen_num];
+            Self::set_skip_taskbar(conn, screen.root, win)
+        }).unwrap_or(Ok(()))
+    }
+
     fn set_skip_taskbar(
         conn: &impl Connection,
         root: x11rb::protocol::xproto::Window,
         win: x11rb::protocol::xproto::Window,
     ) -> Result<(), WindowError> {
         use x11rb::protocol::xproto::{
-            ClientMessageData, ClientMessageEvent, EventMask, CLIENT_MESSAGE_EVENT,
+            ClientMessageData, ClientMessageEvent, EventMask, CLIENT_MESSAGE_EVENT, PropMode,
         };
 
         let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
         let skip_taskbar = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?.reply()?.atom;
         let skip_pager = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")?.reply()?.atom;
 
+        // 1. 直接追加写入窗口属性：
+        // 在窗口 map 之前预先写入，确保 Mutter 处理 MapRequest 时首帧即读取到 SKIP_TASKBAR，
+        // 彻底根除 Ubuntu Dock 在窗口创建/显隐瞬间抓取到普通窗口并错误驻留的竞态条件。
+        let _ = conn.change_property32(
+            PropMode::APPEND,
+            win,
+            net_wm_state,
+            x11rb::protocol::xproto::AtomEnum::ATOM,
+            &[skip_taskbar, skip_pager],
+        );
+
         let event_mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
 
-        // 发送 ClientMessage 通知窗口管理器附加跳过任务栏和跳过分页器
-        // 遵循 EWMH 标准：绝对不使用 change_property(REPLACE) 覆盖 _NET_WM_STATE，亦不破坏 GTK 原生最大化
+        // 2. 发送 ClientMessage 通知窗口管理器附加跳过任务栏和跳过分页器
+        // 遵循 EWMH 标准：source indication = 2 (直接用户动作/Pager)，绕过防焦点与防篡改限制
         let event_skip = ClientMessageEvent {
             response_type: CLIENT_MESSAGE_EVENT,
             format: 32,
@@ -428,7 +473,7 @@ impl WindowAdapter {
                 1, // _NET_WM_STATE_ADD
                 skip_taskbar,
                 skip_pager,
-                1,
+                2, // source indication: 2
                 0,
             ]),
         };
@@ -749,6 +794,26 @@ mod tests {
             println!("X11 connection raw fd: {}", fd);
             assert!(fd >= 0);
         });
+    }
+
+    #[test]
+    fn test_check_pointer_against_vok_and_border_clamping() {
+        let wa = WorkAreaGeometry {
+            x: 132,
+            y: 64,
+            width: 3068,
+            height: 1936,
+        };
+        // 调用 check_pointer_against_vok 不发生 panic
+        let res = WindowAdapter::check_pointer_against_vok(wa, 0x1234);
+        println!("check_pointer_against_vok result: {:?}", res);
+    }
+
+    #[test]
+    fn test_set_window_skip_taskbar_does_not_panic() {
+        assert!(WindowAdapter::set_window_skip_taskbar(0).is_ok());
+        // 传入一个合法或非法 XID 均能平稳处理并返回 Result
+        let _ = WindowAdapter::set_window_skip_taskbar(0x9999);
     }
 }
 

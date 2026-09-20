@@ -29,6 +29,10 @@
 - §23 **废除指针移出表面猜想，建立基于 XInput 2 (XI2 RawButtonPress) 全屏幕无侵入物理点击与真实前台失焦架构规范 (True Focus-Loss & XI2 Passive Outside-Click Policy)** — 彻底根除晃动鼠标误退出与点击内联非交互区误关闭病根；基于 XI2 原始按键流被动监听全屏（含 Ubuntu Dock 与顶栏）物理点击；GTK 事件控制器零假动作；鼠标晃动 0 响应；外部点击 100% 精准退让并原子返还焦点。
 - §24 **基于 PolicyKit (Polkit) 原生授权与 Linux 内核 evdev 硬件级全盲区鼠标点击感知规范 (Polkit & Evdev Hardware Mouse Click Policy)** — 建立标准桌面 Polkit 原生认证与现代 `uaccess` 规范，一键图形化授权；封装 `EvdevMouseWatcher` 直接读取物理鼠标 `BTN_LEFT`，实现包含 Ubuntu Dock 纯空白死区在内的全屏任意盲区 0 微秒瞬时退让，鼠标晃动 100% 绝对免疫。
 - §25 **突破 Wayland 坐标钳位与触控板轻击 (Tap) 状态机：双轨窗口层级与全按键退让规范 (Wayland Clamp-Bypass & Touchpad Tap Policy)** — 采用 `child != vok_xid` 突破 Wayland 任务栏坐标钳位死穴；落地触控板 `BTN_TOUCH` 250ms 轻击状态机与全按键监听；澄清日志因果链，彻底攻克 Dock 空白处无法隐退难题。
+- §26 **攻克 Dock 首次点击成功后全失效与任务栏图标偶发驻留：边界钳位容差与首帧预写入规范 (Dock Border Clamping & Pre-Map Taskbar Invariant)** — 引入 6 物理像素边缘钳位容差算法，根治 Xwayland 坐标冻结；首帧前直接向 X11 属性写入 `_NET_WM_STATE_SKIP_TASKBAR`，彻底消除 Ubuntu Dock 图标偶发驻留。
+- §27 **快捷键长短按模式判决重构、内核 evdev 组合键全硬件流与 GNOME DBus 回声防抖规范 (Release-Decided Hotkey & Evdev Chord Pipeline Policy)** — 根治首帧 4.7ms 误判 Momentary 闪退缺陷，以释放时差值权威判定长短按；`EvdevMonitor` 原子追踪修饰键与组合键解耦，支持热重载与 Mid-drag 呼出；350ms DBus 回声防抖彻底消除 evdev 与系统快捷键双轨竞态。
+- §28 **彻底根除长按无限交替开关震荡：GNOME Typematic 连发抑制与三重防御架构 (Typematic Repeat Suppression & Triple-Shield Toggle Architecture)** — 查明 GNOME typematic 自动连发（500ms delay + 30ms interval）与单向防抖漏洞造成的 ~380ms 振荡；构建硬件电平权威仲裁、连发心跳感知与双向对称防抖体系。
+- §29 **双轨长短按自适应状态机、蓝牙 UHID 设备 seat0 提权与 evdev 动态热插拔自检规范 (Dual-Track Hold Detector & Dynamic Evdev Hotplug Policy)** — 建立 DbusHoldDetector 连发心跳保活状态机（85ms 侦听判决 + 110ms silence 保活），彻底解决纯 D-Bus 链路长按 500ms 自动闪退问题；重构 `/etc/udev/rules.d/70-vok-input.rules` 赋予 `TAG+="seat", ENV{ID_SEAT}="seat0"` 破解蓝牙 UHID 权限隔离；`EvdevMonitor` 落地后台动态热插拔自检与权限即刻重载。
 
 ---
 
@@ -544,3 +548,150 @@
      - `OverlayWindow::reveal()` 呈现时动态刷新最新的 `vok_xid`，并在 200ms 防抖延迟后原子启用监听；
      - 每次物理输入捕获与外置决策均输出包含设备、事件码、光标坐标、子窗口 XID 的确凿日志，实现完全透明可观测。
 - **状态**：Active（2026-09-19 确立）。
+
+---
+
+### §26 攻克 Dock 首次点击成功后全失效与任务栏图标偶发驻留：边界钳位容差与首帧预写入规范 (Dock Border Clamping & Pre-Map Taskbar Invariant)
+
+- **背景与痛点**：
+  用户反馈两大非确定性现象：
+  1. 点击任务栏空白依旧不自动隐藏：第一下可以正常隐藏，但后续全部失效；
+  2. 任务栏（Ubuntu Dock）偶尔会出现 Vok 图标/运行圆点驻留。
+- **根因精确定位 (Root Cause)**：
+  1. **Dock 首次隐藏成功、后续全部失效的因果链路**：
+     - 当 Vok 从隐藏到初次被唤起且光标初始停留在 Dock 时，Xwayland 从未收到针对 Vok 的 `EnterNotify`，`reply.child` 为 `0x0`，故 `child != vok_xid` 为真，首下能够成功隐藏；
+     - 但当下一次用户在 Vok 界面中移动光标后，Xwayland 收到 `EnterNotify`，记录当前顶级子窗口为 `vok_xid` (`0x2000004`)；
+     - 随后用户将鼠标向左移入 Ubuntu Dock，Mutter 原生 Clutter actor 接管指针并不再向 Xwayland 派发任何 motion 事件。Xwayland 中的光标坐标被停滞在表面交界处：$x=133$（$wa.x=132$），且 Xwayland 从未收到 `LeaveNotify`，`reply.child` 永久维持在 `vok_xid`；
+     - 此时用户在 Dock 上无论点击何处，X11 查询到的始终是 $(x=133, \text{child}=\text{vok\_xid})$，导致 `geom_outside`（$133 < 132 \rightarrow \text{false}$）与 `window_outside`（$\text{vok\_xid} \neq \text{vok\_xid} \rightarrow \text{false}$）双双判定为假，后续所有点击全部被误判为“在 Vok 内部点击”而遭忽略！
+  2. **任务栏偶发驻留 Vok 图标的因果链路**：
+     - GTK 4 原生移除了 `set_skip_taskbar_hint`，此前系统通过 `window.connect_map` 在窗口映射后异步发送 X11 ClientMessage；
+     - 当 GTK 呈现窗口时，窗口先被 X11 / Xwayland 映射（MapWindow），Mutter / GNOME Shell `ShellWindowTracker` 立即捕获到新映射的 `com.vok.desktop` 窗口；在 ClientMessage 到达前的数毫秒空窗期内，窗口属性尚未具备 `_NET_WM_STATE_SKIP_TASKBAR`，Ubuntu Dock 遂将其加入运行应用列表中；
+     - 若用户短时间内关闭或再次切换窗口，Dock 内部状态产生时序竞争，导致图标或运行指示点未能及时清除，残留于 Dock 中。
+- **最终方案**：
+  1. **工作区避让边缘钳位容差算法 (`border_clamped`)**：
+     - 在 `WindowAdapter::check_pointer_against_vok` 中引入 6 物理像素（HiDPI 下为 3 逻辑像素）的避让边界钳位检测：
+       ```rust
+       let border_clamped = (wa.x > 0 && x <= wa.x + 6)
+           || (wa.y > 0 && y <= wa.y + 6)
+           || (screen_w > 0 && (wa.x + wa.width as i32) < screen_w && x >= (wa.x + wa.width as i32 - 6))
+           || (screen_h > 0 && (wa.y + wa.height as i32) < screen_h && y >= (wa.y + wa.height as i32 - 6));
+       let is_outside = geom_outside || window_outside || border_clamped;
+       ```
+     - 严密数学与布局证明：Vok 根容器拥有 `padding: 16px 20px`（Scale 2 下为 40 物理像素），边缘 6 物理像素内绝对无任何可点击 Widget。当光标处于该避让边缘带内，100% 系用户光标移入 Dock/顶栏被合成器钳位所致，权威判定为外置点击，彻底攻克后续点击全失效难题。
+  2. **首帧前预写入与双轨保障 (`set_window_skip_taskbar`)**：
+     - 初始化时立即执行 `window.realize()`，使底层 X11 Window 立即创建；
+     - 显式通过 `change_property32(PropMode::APPEND)` 直接将 `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_STATE_SKIP_PAGER` 写入 X11 窗口的 `_NET_WM_STATE` 属性中；
+     - 在 `OverlayWindow::reveal()` 呼出前预先写入，确保 Mutter 接收到 `MapRequest` 的首帧即可读取到跳过任务栏属性，杜绝任何未带属性的中间帧暴露给 GNOME Shell；
+     - 同时保留 EWMH ClientMessage 通知机制（source indication = 2），并为桌面启动项配置 `StartupNotify=false`，彻底根除 Dock 偶发驻留。
+- **状态**：Active（2026-09-19 确立）。
+
+---
+
+### §27 快捷键长短按模式判决重构、内核 evdev 组合键全硬件流与 GNOME DBus 回声防抖规范 (Release-Decided Hotkey & Evdev Chord Pipeline Policy)
+
+- **背景与痛点**：
+  1. **首帧时钟缺陷（First-Frame Clock Defect）**：用户物理短按快捷键（如 Alt+Space，人类敲击用时 ~80ms），首帧 Buffer 极速渲染提交仅需 ~4.7ms。旧状态机在首帧到达时若按键仍处于按下电平（`is_key_down: true`）便武断推断为 `HotkeyMode::Momentary`，导致短按松手时触发 `PhysicalRelease` 被视作长按松手而无条件隐藏闪退；
+  2. **`EvdevMonitor` 硬编码 F12 且缺失组合键（Chord）追踪**：旧 `EvdevMonitor` 仅监听单个 `Key::KEY_F12`，无法支持用户自定义的组合键（如 `Alt + Space`、`Super + Space`）；且外部文件拖拽中（Mid-drag Summon），GNOME 快捷键被拖拽抓取吞噬，内核级组合键监听缺失导致拖拽中无法呼出；
+  3. **双轨竞态与 GNOME DBus 误关窗口（DBus Echo Bug）**：`evdev` 在内核级毫秒内捕获物理按键并呈现窗口，GNOME `custom-keybinding` 随后经由 DBus 发起 `toggle` 调用（延迟 ~20-80ms）；DBus 处理函数误见窗口已经处于 `is_visible: true` 状态，误将其视作“再次按下快捷键关闭”，导致窗口刚打开瞬间被误关。
+- **根因分析与架构重构**：
+  1. **状态机释放时判定（Release-Decided Invariant）**：
+     - `SessionState::Visible` 状态字段扩展为包含 `press_instant: Instant`；
+     - 首帧 `FrameCommitted` 到达时，若按键未松开，仅保持 `is_key_down: true`，严禁提前断言为 Momentary；
+     - 待物理按键真正释放 `PhysicalRelease(release_instant)` 时，以 $\Delta t = \text{release\_instant} - \text{press\_instant}$ 与阈值（`DEFAULT_TAP_MAX_MS = 280ms`）进行权威判决：$\le 280\text{ms}$ 为 Toggle（保持常驻显示，`is_key_down: false`），$> 280\text{ms}$ 为 Momentary（松手即隐藏）；
+  2. **`EvdevMonitor` 全按键映射与组合键电平流**：
+     - 实现 `key_name_to_evdev_key(&str) -> Option<Key>`，覆盖功能键、字母、数字、符号、导航键等全量标准按键；
+     - 构建无锁原子的 `ModifierTracker`（`AtomicBool` 独立追踪 `left/right_ctrl`, `left/right_alt`, `left/right_shift`, `left/right_super`），消除跨设备与修饰键冲突；
+     - 在后台事件流中，主键按下时比对修饰键全匹配，触发 `Pressed`；主键释放或任一关键修饰键提前释放时触发 `Released`，精准支持组合键与外部拖拽中（Mid-drag）内核级直接呼出；
+     - 提供 `update_target_hotkey(&self, config: &HotkeyConfig)` 支持设置窗口修改快捷键后热重载；
+  3. **GNOME DBus 回声防抖（DBus Echo Debounce）**：
+     - 记录全局 `last_reveal_instant: Option<Instant>`；
+     - 在 DBus `toggle` 或命令行二次激活到达时校验窗口呈现时长：若处于 350ms 保护窗口内，权威判定为同一物理击键派发的系统级回声，安全忽略；若 $> 350\text{ms}$ 则正常执行 Toggle 关闭。
+- **状态**：Active（2026-09-20 确立）。
+
+---
+
+### §28 彻底根除长按无限交替开关震荡：GNOME Typematic 连发抑制与三重防御架构 (Typematic Repeat Suppression & Triple-Shield Toggle Architecture)
+
+- **背景与痛点**：
+  用户在实机长按快捷键（如 `Alt + Space`）时，工作台出现严重 bug：窗口以约 380ms 周期在“打开-关闭-打开-关闭”间无限交替翻转闪烁，无法稳定常驻呈现。
+- **根因精确定位 (Root Cause)**：
+  1. **GNOME Typematic 自动连发特性**：GNOME `custom-keybindings` 在物理按键被按住时，键盘硬件与合成器以 ~30Hz 频率（500ms delay + 30ms repeat-interval）疯狂向 D-Bus 发送 `toggle` 动作指令；
+  2. **单向防抖不对称漏洞**：旧代码仅对 `is_visible == true` 做了 350ms 防抖，对 `is_visible == false` **完全无防抖**！当用户长按超过 500ms 时：
+     - 首发连发在 500ms 到达（> 350ms），将窗口隐藏；
+     - 仅 30ms 后下一发连发到达，因 `is_visible == false` 无防抖，立即将窗口重新打开，并向状态机注入伪造的 `PhysicalPress` 与 `PhysicalRelease`；
+     - 再过 350ms，下一发连发再次关闭窗口；
+     - 构成了 `Show (350ms) -> Hide (30ms) -> Show (350ms) -> Hide` 的 ~380ms 无限振荡时钟；
+  3. **双轨失联**：DBus Toggle 链路完全未查询底层的 `EvdevMonitor` 物理按键电平，在用户手指依然死死按住按键时盲目执行关闭。
+- **最终方案（三重防御架构 Triple-Shield Architecture）**：
+  1. **第一重：硬件电平权威仲裁 (Hardware Level Shield)**：
+     - `EvdevMonitor` 提供原子的 `is_hotkey_active(&self) -> bool` 查询；
+     - 只要用户手指按在物理按键上，`action_toggle` 与 `TrayCommand::Toggle` 立即判定所有到达的 DBus `toggle` 指令均为系统连发，**无条件直接丢弃**，不向事件通道压入消息；
+  2. **第二重：连发速率极速过滤 (Typematic Burst Filter)**：
+     - 记录全局 `last_toggle_call: Option<Instant>`；
+     - 若连续两次 Toggle 尝试间隔 $< 150\text{ms}$，判定为 typematic repeat 突发连发序列，直接抑制，彻底消除无 evdev 环境下的连发震荡；
+  3. **第三重：双向对称状态翻转防抖 (Bidirectional State Change Debounce)**：
+     - 将原先仅记录呼出时间的 `last_reveal_instant` 重构为全生命周期的 `last_state_change: Option<Instant>`；
+     - 无论是呼出、隐藏、Esc 退出、外部点击退出还是反向拖出结束，均原子刷新 `last_state_change`；
+     - 任何方向的状态翻转均必须满足 $\Delta t \ge 350\text{ms}$ 阈值，阻断任何微秒/毫秒级的回声振荡。
+- **状态**：Active（2026-09-20 确立）。
+
+---
+
+### §29 双轨长短按自适应状态机、蓝牙 UHID 设备 seat0 提权与 evdev 动态热插拔自检规范 (Dual-Track Hold Detector & Dynamic Evdev Hotplug Policy)
+
+- **背景与痛点**：
+  1. 用户在未配置 input 用户组或使用蓝牙/无线键盘（通过 `/devices/virtual/misc/uhid` 挂载，如 VGN S99-2 Keyboard）时，因缺乏 seat 标签导致 `evdev` 无法打开内核设备，系统回退至纯 D-Bus / GNOME 快捷键链路；
+  2. GNOME `custom-keybinding` 在长按时不发 release 事件，仅在 500ms 初始延时后以 ~30Hz 频率连发 `toggle`。旧代码在 500ms 收到第一发 repeat 时，因窗口已可见且 $> 300\text{ms}$ 防抖，误将其当成二次点击而直接关闭窗口，导致长按过程中界面自动关闭；
+  3. systemd `71-seat.rules` 与 `73-seat-late.rules` 对虚拟 uhid 设备缺少 `path_id`，未能为其分配 `ID_SEAT="seat0"`，且旧规则 `99-vok-input.rules` 晚于 73-seat-late 执行，未能成功赋予 POSIX ACL；
+  4. `EvdevMonitor` 原先仅在应用启动时执行一次静态扫描，蓝牙键盘休眠唤醒、重连或权限授予后无法动态挂载。
+- **最终方案**：
+  1. **DbusHoldDetector 连发心跳保活状态机 (D-Bus Hold Detection State Machine)**：
+     - 在纯 D-Bus 模式下，将 GNOME typematic repeat 视作物理按键按压的心跳信号；
+     - 窗口可见时收到第 1 发指令启动 85ms 侦听计时器；
+     - 若 85ms 内收到第 2 发连发（典型间隔 ~30ms），100% 判定为长按，立即进入 `is_holding = true` 常驻模式并启动 110ms silence 计时器；
+     - 随后每发连发刷新 110ms silence 计时器，长按过程中窗口保持常驻呈现；
+     - 松手后连发停止，110ms silence 计时器超时触发隐藏（Momentary）；
+     - 若为单次短按点击关闭，85ms 内无第二发到达，计时器正常触发隐藏。
+  2. **蓝牙 UHID 规则重构与动态提权 (Early udev seat0 Policy)**：
+     - 将规则前移至 `/etc/udev/rules.d/70-vok-input.rules`（先于 71-seat.rules 与 73-seat-late.rules）；
+     - 显式声明 `KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess", TAG+="seat", ENV{ID_SEAT}="seat0", MODE="0660", GROUP="input"` 并联动 `usermod -aG input {username}` 与 `setfacl`；
+  3. **EvdevMonitor 动态热插拔与权限自检 (Dynamic Evdev Hotplug)**：
+     - `monitored_paths: Arc<Mutex<HashSet<PathBuf>>>` 动态追踪已接入设备；
+     - 后台启动每 2 秒一次的动态扫描自检线程，新设备接入/新获权设备自动热挂载，拔出时自动注销；
+     - 结合 `settings_window.set_on_permission_granted` 实现授权后毫秒级即刻挂载。
+- **被否决方案**：
+  - *纯盲等或依赖 sleep*：违反 R11 铁律；
+  - *仅依赖 evdev 强行报错退出*：导致无 root/未授权用户无法使用应用，违背鲁棒性原则。
+- **状态**：Active（2026-09-20 确立）。
+
+---
+
+### §30 窗口级按键释放拦截与输入法隔离架构：0ms 极致跟手长按瞬关与 Fcitx/IBus 修饰键防泄露体系 (Zero-Latency Window Key-Release & IME Isolation Architecture)
+
+- **背景与痛点**：
+  1. **输入法状态抽搐乱切**：在 Linux / Fcitx5 / IBus 桌面环境中，使用快捷键（如 `Alt + Space`）呼出或关闭工作台时，系统输入法频繁在“拼音”与“英文 (en)”之间来回剧烈切换并产生状态副作用；
+  2. **长按松手关闭严重不跟手（迟滞感）**：纯依赖 D-Bus 连发心跳静默超时（350ms）检测长按松手时，用户抬起手指后界面仍停滞超过 1/3 秒才消失，无法实现“手抬即隐”的瞬关体验，交互严重滞后。
+- **根因精确定位 (Root Cause)**：
+  1. **孤立修饰键泄露至输入法**：旧代码中 UI 层的 `EventControllerKey` 仅在 `connect_key_pressed` 中拦截了完整组合键，**完全没有监听 `connect_key_released`**，且放行了 `Alt_L` / `Alt_R` 的单独按压。当用户按下并释放 `Alt + Space` 时，`Alt` 键的按下与释放事件穿透至 `search_entry` 和底层 `GtkIMContext`。Fcitx5 收到未配对的独立修饰键释放，判定为中英文模式切换热键，导致输入法状态反复横跳；
+  2. **D-Bus 协议无按键释放语义**：GNOME `custom-keybinding` 仅在按下和连发时触发命令行，完全不提供 KeyRelease 回调，导致仅靠后台 D-Bus 永远无法获得亚毫秒级的物理松手感知。
+- **最终方案（最优解 Optimal Architecture）**：
+  1. **窗口焦点级按键释放 0ms 瞬时感知 (Zero-Latency Window Key-Release)**：
+     - 在 `OverlayWindow` 的 `key_controller`（`PropagationPhase::Capture`）中全新挂载 `connect_key_released`；
+     - 引入 `is_initial_press_held: Rc<Cell<bool>>` 严格追踪“呼出初始击键”状态：
+       - 窗口 `reveal()` 时标记 `is_initial_press_held = true`；
+       - 当用户在窗口前台松开快捷键或修饰键时，若按住时长 $\Delta t > 280\text{ms}$（长按瞬态模式），**以 0ms 延迟立即触发 `on_dismiss()` 隐藏窗口**（真正实现手抬即隐、纳秒级极致跟手）；
+       - 若 $\Delta t \le 280\text{ms}$（短按翻转模式），则保持常驻展开，并将 `is_initial_press_held` 置为 `false`；
+       - `OverlayWindow::hide()` 清场时原子重置 `is_initial_press_held = false`；
+     - 后续用户在搜索框内正常输入空格、字符或执行编辑时，完全不受任何拦截与副作用影响。
+  2. **全生命周期修饰键拦截与输入法隔离 (Complete IME Isolation)**：
+     - 在 `connect_key_pressed` 中，除了拦截目标按键，精准拦截当前热键使用的修饰键（`Alt_L/R`, `Ctrl_L/R`, `Shift_L/R`, `Super_L/R`），禁止其穿透至 `GtkIMContext`；
+     - 在 `connect_key_released` 中，完全消费并阻断热键与修饰键的释放事件，不向子控件与输入法派发任何孤立事件；
+     - Fcitx5 / IBus 不再接收到任何异常的修饰键脉冲，输入法状态彻底稳固。
+  3. **精细化键盘权限诊断 (Granular Active Keyboard Diagnostics)**：
+     - `SystemPermission::has_input_permissions()` 遍历 `/proc/bus/input/devices`，精确验证系统中**每一个活跃物理键盘设备**的读写权限，杜绝因个别设备有权限而掩盖蓝牙键盘无权限的假阳性；
+     - D-Bus 350ms 静默超时保留作为窗口未获得焦点等极端边缘场景下的后台安全兜底网。
+- **被否决方案**：
+  - *纯 D-Bus 延长或缩短 silence 超时*：缩短会导致 286ms 调度抖动时误关震荡，延长会导致松手迟滞加剧；
+  - *全局禁用搜索框 IMContext*：会导致用户无法在搜索框输入中文应用名与文件名，严重损害核心功能。
+- **状态**：Active（2026-09-20 确立）。
+

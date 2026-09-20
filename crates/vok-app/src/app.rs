@@ -17,10 +17,10 @@ use crate::overlay::OverlayWindow;
 use crate::ui::{SettingsWindow, ThemeManager};
 
 struct AppState {
-    overlay: Rc<OverlayWindow>,
+    _overlay: Rc<OverlayWindow>,
     _settings_window: Rc<SettingsWindow>,
     _theme_manager: ThemeManager,
-    state_machine: Rc<RefCell<SessionStateMachine>>,
+    _state_machine: Rc<RefCell<SessionStateMachine>>,
     _tray: Option<vok_infra::TrayHandle>,
     _hold_guard: gtk4::gio::ApplicationHoldGuard,
 }
@@ -30,44 +30,74 @@ pub struct VokApp {
 }
 
 impl VokApp {
-    pub fn new(event_rx: Receiver<HotkeyEvent>) -> Self {
+    pub fn new(
+        event_rx: Receiver<HotkeyEvent>,
+        evdev_monitor: Option<Arc<vok_infra::EvdevMonitor>>,
+        storage: StorageClient,
+    ) -> Self {
         let app = Application::builder()
             .application_id("com.vok.desktop")
             .build();
 
         let event_rx = Arc::new(event_rx);
         let state: Rc<RefCell<Option<AppState>>> = Rc::new(RefCell::new(None));
+        let last_state_change: Rc<RefCell<Option<std::time::Instant>>> =
+            Rc::new(RefCell::new(None));
+
+        #[derive(Debug)]
+        struct DbusHoldDetector {
+            pending_hold_source: Option<glib::SourceId>,
+            silence_source: Option<glib::SourceId>,
+            reveal_instant: Option<std::time::Instant>,
+            is_holding: bool,
+        }
+
+        impl DbusHoldDetector {
+            fn new() -> Self {
+                Self {
+                    pending_hold_source: None,
+                    silence_source: None,
+                    reveal_instant: None,
+                    is_holding: false,
+                }
+            }
+
+            fn cancel_all(&mut self) {
+                if let Some(s) = self.pending_hold_source.take() {
+                    s.remove();
+                }
+                if let Some(s) = self.silence_source.take() {
+                    s.remove();
+                }
+                self.reveal_instant = None;
+                self.is_holding = false;
+            }
+        }
+
+        let dbus_hold_detector: Rc<RefCell<DbusHoldDetector>> =
+            Rc::new(RefCell::new(DbusHoldDetector::new()));
+
+        #[derive(Debug, Clone, Copy)]
+        enum TrayCommand {
+            Toggle,
+            OpenSettings,
+            Quit,
+        }
+
+        let tray_tx_cell: Rc<RefCell<Option<async_channel::Sender<TrayCommand>>>> =
+            Rc::new(RefCell::new(None));
+        let tray_tx_for_act = tray_tx_cell.clone();
 
         let state_clone = state.clone();
-        app.connect_activate(move |app| {
-            // 若已有实例在运行，则直接切换显隐状态 (Toggle)
-            if let Some(ref current) = *state_clone.borrow() {
-                let overlay = current.overlay.clone();
-                let sm = current.state_machine.clone();
-                let is_visible = overlay.is_visible();
+        let evdev_clone_for_act = evdev_monitor.clone();
+        let storage_clone_for_act = storage.clone();
+        let detector_clone_for_act = dbus_hold_detector;
 
-                if is_visible {
-                    info!("【全局快捷键/切换】工作台当前处于可见状态，执行隐藏退出...");
-                    let gen = sm.borrow().current_generation();
-                    let action = sm.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
-                    if matches!(action, SessionAction::Hide(_)) {
-                        overlay.hide();
-                        sm.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
-                        info!("【全局快捷键】工作台已成功隐藏。");
-                    }
-                } else {
-                    info!("【全局快捷键/切换】工作台当前处于隐藏状态，执行呼出呈现...");
-                    let now = std::time::Instant::now();
-                    let action = sm.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
-                    let _ = sm.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
-                    if let SessionAction::Reveal(gen) = action {
-                        overlay.reveal(gen);
-                        let commit_act = sm.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
-                        if matches!(commit_act, SessionAction::Hide(_)) {
-                            overlay.hide();
-                        }
-                        info!("【全局快捷键】工作台已成功呈现 [{}]。", gen);
-                    }
+        app.connect_activate(move |app| {
+            // 若已有实例在运行，则统一通过 TrayCommand::Toggle 执行显隐切换与多重防抖
+            if state_clone.borrow().is_some() {
+                if let Some(ref tx) = *tray_tx_for_act.borrow() {
+                    let _ = tx.send_blocking(TrayCommand::Toggle);
                 }
                 return;
             }
@@ -82,14 +112,7 @@ impl VokApp {
                 settings.set_gtk_enable_animations(false);
             }
 
-            // 0.1 初始化持久化 SQLite WAL 存储
-            let storage = match StorageClient::open_default() {
-                Ok(s) => s,
-                Err(e) => {
-                    error!("初始化持久化存储失败: {}", e);
-                    panic!("Fatal: 无法初始化 SQLite 存储: {}", e);
-                }
-            };
+            let storage = storage_clone_for_act.clone();
 
             // 0.2 读取已保存的全局唤醒快捷键 (若无则默认 F12) 并绑定至 GNOME 桌面环境
             let active_shortcut = match storage.get_setting("hotkey.summon") {
@@ -139,20 +162,28 @@ impl VokApp {
                 });
             }
 
-            // 3.3 绑定设置窗口快捷键变更联动工作台底部提示
+            // 3.3 绑定设置窗口快捷键变更联动工作台底部提示与内核按键监听
             {
                 let overlay_clone = overlay.clone();
+                let evdev_clone = evdev_clone_for_act.clone();
                 settings_window.set_on_hotkey_changed(move |new_config| {
+                    if let Some(ref evdev) = evdev_clone {
+                        evdev.update_target_hotkey(&new_config);
+                    }
                     overlay_clone.update_hotkey_display(new_config);
                 });
             }
 
-            // 3.4 绑定设置窗口授权成功后即刻热挂载内核硬件级鼠标监听
+            // 3.4 绑定设置窗口授权成功后即刻热挂载内核硬件级鼠标与键盘监听
             {
                 let overlay_clone = overlay.clone();
+                let evdev_clone = evdev_clone_for_act.clone();
                 settings_window.set_on_permission_granted(move || {
-                    info!("【规范授权响应】检测到系统硬件权限已授予，即刻热挂载 EvdevMouseWatcher");
+                    info!("【规范授权响应】检测到系统硬件权限已授予，即刻热挂载 EvdevMouseWatcher 与 EvdevMonitor");
                     overlay_clone.ensure_evdev_watcher();
+                    if let Some(ref evdev) = evdev_clone {
+                        evdev.scan_now();
+                    }
                 });
             }
 
@@ -160,11 +191,15 @@ impl VokApp {
             {
                 let sm_clone = state_machine.clone();
                 let overlay_clone = overlay.clone();
+                let last_state_change_dismiss = last_state_change.clone();
+                let detector_dismiss = detector_clone_for_act.clone();
                 overlay.set_on_dismiss(move || {
+                    detector_dismiss.borrow_mut().cancel_all();
                     let gen = sm_clone.borrow().current_generation();
                     let _action = sm_clone.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
                     overlay_clone.hide();
                     sm_clone.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                    *last_state_change_dismiss.borrow_mut() = Some(std::time::Instant::now());
                     info!("工作台已退出隐藏。");
                 });
             }
@@ -196,12 +231,16 @@ impl VokApp {
             {
                 let sm_clone = state_machine.clone();
                 let overlay_clone = overlay.clone();
+                let last_state_change_drag = last_state_change.clone();
+                let detector_drag = detector_clone_for_act.clone();
                 overlay.set_on_drag_end(move || {
+                    detector_drag.borrow_mut().cancel_all();
                     let gen = sm_clone.borrow().current_generation();
                     let action = sm_clone.borrow_mut().handle_event(SessionEvent::DragEnded(gen));
                     if matches!(action, SessionAction::Hide(_)) {
                         overlay_clone.hide();
                         sm_clone.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                        *last_state_change_drag.borrow_mut() = Some(std::time::Instant::now());
                         info!("【反向拖出完成】会话 [{}] 代理模式安全退出并隐退", gen);
                     }
                 });
@@ -225,25 +264,31 @@ impl VokApp {
             // 7. 在 UI 线程异步监听事件流并推进状态机
             let sm_for_events = state_machine.clone();
             let overlay_for_events = overlay.clone();
+            let last_state_change_for_events = last_state_change.clone();
+            let detector_events = detector_clone_for_act.clone();
 
             glib::spawn_future_local(async move {
                 while let Ok(event) = async_rx.recv().await {
+                    detector_events.borrow_mut().cancel_all();
                     let mut sm = sm_for_events.borrow_mut();
                     match event.state {
                         vok_infra::input::KeyState::Pressed => {
                             let action = sm.handle_event(SessionEvent::PhysicalPress(event.timestamp));
                             if let SessionAction::Reveal(gen) = action {
                                 info!("【热键按下】呈现工作台 {}", gen);
+                                *last_state_change_for_events.borrow_mut() = Some(event.timestamp);
                                 overlay_for_events.reveal(gen);
 
                                 let commit_act = sm.handle_event(SessionEvent::FrameCommitted(gen));
                                 if matches!(commit_act, SessionAction::Hide(_)) {
                                     overlay_for_events.hide();
+                                    *last_state_change_for_events.borrow_mut() = Some(std::time::Instant::now());
                                 }
                             } else if let SessionAction::Hide(gen) = action {
                                 info!("【热键按下】Toggle 再次触发，隐藏工作台 {}", gen);
                                 overlay_for_events.hide();
                                 sm.handle_event(SessionEvent::Unmapped(gen));
+                                *last_state_change_for_events.borrow_mut() = Some(event.timestamp);
                             }
                         }
                         vok_infra::input::KeyState::Released => {
@@ -252,6 +297,7 @@ impl VokApp {
                                 info!("【热键释放】长按 Momentary 结束，隐藏工作台 {}", gen);
                                 overlay_for_events.hide();
                                 sm.handle_event(SessionEvent::Unmapped(gen));
+                                *last_state_change_for_events.borrow_mut() = Some(event.timestamp);
                             }
                         }
                         vok_infra::input::KeyState::Repeat => {}
@@ -260,14 +306,8 @@ impl VokApp {
             });
 
             // 8. 启动系统托盘常驻守护服务 (StatusNotifierItem)
-            #[derive(Debug, Clone, Copy)]
-            enum TrayCommand {
-                Toggle,
-                OpenSettings,
-                Quit,
-            }
-
             let (tray_tx, tray_rx) = async_channel::unbounded::<TrayCommand>();
+            *tray_tx_cell.borrow_mut() = Some(tray_tx.clone());
             let tx_toggle = tray_tx.clone();
             let tx_settings = tray_tx.clone();
             let tx_quit = tray_tx;
@@ -276,22 +316,46 @@ impl VokApp {
             let settings_for_tray = settings_window.clone();
             let sm_for_tray = state_machine.clone();
             let app_for_tray = app.clone();
+            let last_state_change_for_tray = last_state_change.clone();
+            let evdev_for_tray = evdev_clone_for_act.clone();
+            let detector_tray = detector_clone_for_act.clone();
 
             glib::spawn_future_local(async move {
                 while let Ok(cmd) = tray_rx.recv().await {
                     match cmd {
                         TrayCommand::Toggle => {
+                            let now = std::time::Instant::now();
+
+                            // 1. 硬件级长按保护：若底层物理热键正处于按下状态，说明是用户长按过程中的系统连发或瞬态回声，直接忽略
+                            if evdev_for_tray.as_ref().map_or(false, |e| e.is_hotkey_active()) {
+                                info!("【Toggle 过滤】物理热键当前正处于按下激活状态，忽略外部/系统重复连发");
+                                continue;
+                            }
+
                             let is_visible = overlay_for_tray.is_visible();
-                            if is_visible {
-                                let gen = sm_for_tray.borrow().current_generation();
-                                let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
-                                if matches!(action, SessionAction::Hide(_)) {
-                                    overlay_for_tray.hide();
-                                    sm_for_tray.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
-                                    info!("【托盘操作】工作台已隐藏。");
+                            if !is_visible {
+                                // 工作台当前处于隐藏状态 -> 立即呼出
+                                detector_tray.borrow_mut().cancel_all();
+
+                                // 检查双向翻转防抖 (250ms)
+                                let last_change = *last_state_change_for_tray.borrow();
+                                if let Some(last_change) = last_change {
+                                    if now.duration_since(last_change) < std::time::Duration::from_millis(250) {
+                                        info!(
+                                            "【Toggle 防抖】忽略距上次状态切换仅 {}ms 的翻转指令",
+                                            now.duration_since(last_change).as_millis()
+                                        );
+                                        continue;
+                                    }
                                 }
-                            } else {
-                                let now = std::time::Instant::now();
+
+                                *last_state_change_for_tray.borrow_mut() = Some(now);
+                                {
+                                    let mut det = detector_tray.borrow_mut();
+                                    det.reveal_instant = Some(now);
+                                    det.is_holding = false;
+                                }
+
                                 let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
                                 let _ = sm_for_tray.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
                                 if let SessionAction::Reveal(gen) = action {
@@ -299,8 +363,136 @@ impl VokApp {
                                     let commit_act = sm_for_tray.borrow_mut().handle_event(SessionEvent::FrameCommitted(gen));
                                     if matches!(commit_act, SessionAction::Hide(_)) {
                                         overlay_for_tray.hide();
+                                        *last_state_change_for_tray.borrow_mut() = Some(std::time::Instant::now());
                                     }
-                                    info!("【托盘操作】工作台已呈现 [{}]。", gen);
+                                    info!("【托盘/外部 Toggle】工作台已呈现 [{}]。", gen);
+                                }
+                            } else {
+                                // 工作台当前处于可见状态
+                                let mut det = detector_tray.borrow_mut();
+
+                                // 情况 A：已经处于长按保持状态中 (连发心跳保活)
+                                if det.is_holding {
+                                    // 这是长按过程中的又一次 typematic 连发心跳，刷新释放检测计时器 (350ms 规避 GNOME 调度抖动)
+                                    if let Some(s) = det.silence_source.take() {
+                                        s.remove();
+                                    }
+
+                                    let overlay = overlay_for_tray.clone();
+                                    let sm = sm_for_tray.clone();
+                                    let last_state = last_state_change_for_tray.clone();
+                                    let det_clone = detector_tray.clone();
+
+                                    det.silence_source = Some(glib::timeout_add_local_once(
+                                        std::time::Duration::from_millis(350),
+                                        move || {
+                                            info!("【长按释放感知】连发心跳停止 (>350ms)，判定长按结束松手，隐藏工作台");
+                                            let mut d = det_clone.borrow_mut();
+                                            d.is_holding = false;
+                                            d.reveal_instant = None;
+                                            d.silence_source = None;
+                                            d.pending_hold_source = None;
+                                            let gen = sm.borrow().current_generation();
+                                            let action = sm.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                                            if matches!(action, SessionAction::Hide(_)) {
+                                                overlay.hide();
+                                                sm.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                                                *last_state.borrow_mut() = Some(std::time::Instant::now());
+                                            }
+                                        },
+                                    ));
+                                    continue;
+                                }
+
+                                // 情况 B：尚未处于长按保持状态中，但已经有待确认长按计时器在跑 (第二发连发到达)
+                                if let Some(pending) = det.pending_hold_source.take() {
+                                    // 在 85ms 内收到第二发连发！100% 判定为长按连发 (Typematic Repeat)！
+                                    pending.remove();
+                                    det.is_holding = true;
+                                    det.reveal_instant = None;
+                                    info!("【长按激活】在 85ms 内收到连续连发心跳，进入长按常驻模式 (松手即隐)");
+
+                                    let overlay = overlay_for_tray.clone();
+                                    let sm = sm_for_tray.clone();
+                                    let last_state = last_state_change_for_tray.clone();
+                                    let det_clone = detector_tray.clone();
+
+                                    det.silence_source = Some(glib::timeout_add_local_once(
+                                        std::time::Duration::from_millis(350),
+                                        move || {
+                                            info!("【长按释放感知】连发心跳停止 (>350ms)，判定长按结束松手，隐藏工作台");
+                                            let mut d = det_clone.borrow_mut();
+                                            d.is_holding = false;
+                                            d.reveal_instant = None;
+                                            d.silence_source = None;
+                                            d.pending_hold_source = None;
+                                            let gen = sm.borrow().current_generation();
+                                            let action = sm.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                                            if matches!(action, SessionAction::Hide(_)) {
+                                                overlay.hide();
+                                                sm.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                                                *last_state.borrow_mut() = Some(std::time::Instant::now());
+                                            }
+                                        },
+                                    ));
+                                    continue;
+                                }
+
+                                // 情况 C：首次在可见状态下收到指令
+                                // 检查是否可能为呼出后的首发连发 (距呼出 350ms ~ 850ms)
+                                let elapsed_since_reveal = det.reveal_instant.map(|t| now.duration_since(t));
+                                let is_potential_initial_hold = elapsed_since_reveal.map_or(false, |d| {
+                                    d >= std::time::Duration::from_millis(350) && d <= std::time::Duration::from_millis(850)
+                                });
+
+                                if is_potential_initial_hold {
+                                    // 这极可能是长按呼出后的首发 typematic repeat！
+                                    // 启动 85ms 侦听：若 85ms 内收到第 2 发，则 100% 确认为长按保持；若无，则判定为用户单次点击关闭
+                                    let overlay = overlay_for_tray.clone();
+                                    let sm = sm_for_tray.clone();
+                                    let last_state = last_state_change_for_tray.clone();
+                                    let det_clone = detector_tray.clone();
+
+                                    det.pending_hold_source = Some(glib::timeout_add_local_once(
+                                        std::time::Duration::from_millis(85),
+                                        move || {
+                                            info!("【单次按键关闭】未在 85ms 内检测到连发心跳，判定为单次按键切换，执行隐藏");
+                                            let mut d = det_clone.borrow_mut();
+                                            d.pending_hold_source = None;
+                                            d.is_holding = false;
+                                            d.reveal_instant = None;
+                                            let gen = sm.borrow().current_generation();
+                                            let action = sm.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                                            if matches!(action, SessionAction::Hide(_)) {
+                                                overlay.hide();
+                                                sm.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                                                *last_state.borrow_mut() = Some(std::time::Instant::now());
+                                            }
+                                        },
+                                    ));
+                                } else {
+                                    // 窗口早已处于常驻显示状态（距呼出已超 850ms，或者此前为短按打开）：
+                                    // 用户再次按下快捷键 -> 立即执行 Toggle 关闭！
+                                    let last_change = *last_state_change_for_tray.borrow();
+                                    if let Some(last_change) = last_change {
+                                        if now.duration_since(last_change) < std::time::Duration::from_millis(250) {
+                                            info!(
+                                                "【Toggle 防抖】忽略距上次状态切换仅 {}ms 的翻转指令",
+                                                now.duration_since(last_change).as_millis()
+                                            );
+                                            continue;
+                                        }
+                                    }
+
+                                    info!("【单次按键关闭】常驻状态下收到 Toggle 指令，立即执行隐藏");
+                                    det.cancel_all();
+                                    let gen = sm_for_tray.borrow().current_generation();
+                                    let action = sm_for_tray.borrow_mut().handle_event(SessionEvent::EscPressed(gen));
+                                    if matches!(action, SessionAction::Hide(_)) {
+                                        overlay_for_tray.hide();
+                                        sm_for_tray.borrow_mut().handle_event(SessionEvent::Unmapped(gen));
+                                        *last_state_change_for_tray.borrow_mut() = Some(now);
+                                    }
                                 }
                             }
                         }
@@ -319,7 +511,11 @@ impl VokApp {
             // 8.1 注册 D-Bus 原生 Action "toggle"，支持外部 0-延时瞬时唤起
             let action_toggle = gtk4::gio::SimpleAction::new("toggle", None);
             let tx_action = tx_toggle.clone();
+            let evdev_clone_for_action = evdev_clone_for_act.clone();
             action_toggle.connect_activate(move |_, _| {
+                if evdev_clone_for_action.as_ref().map_or(false, |e| e.is_hotkey_active()) {
+                    return;
+                }
                 info!("【D-Bus 极速唤起】收到系统快捷键/外部 Toggle 动作");
                 let _ = tx_action.send_blocking(TrayCommand::Toggle);
             });
@@ -354,16 +550,17 @@ impl VokApp {
 
             // 保存全局实例状态
             *state_clone.borrow_mut() = Some(AppState {
-                overlay: overlay.clone(),
+                _overlay: overlay.clone(),
                 _settings_window: settings_window.clone(),
                 _theme_manager: theme_manager,
-                state_machine: state_machine.clone(),
+                _state_machine: state_machine.clone(),
                 _tray: tray_handle,
                 _hold_guard: hold_guard,
             });
 
             // 首次启动自动呼出呈现
             let now = std::time::Instant::now();
+            *last_state_change.borrow_mut() = Some(now);
             let initial_action = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalPress(now));
             let _ = state_machine.borrow_mut().handle_event(SessionEvent::PhysicalRelease(now));
             if let SessionAction::Reveal(gen) = initial_action {

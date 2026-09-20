@@ -19,6 +19,7 @@
 | R11 | 坚决杜绝直接复用 Workbench-APP 遗留代码与基于 sleep 的时序规避 | 架构纪律 | 是 |
 | R12 | GNOME Wayland 下 Xwayland 无法感知 Dock 空白处点击，严禁指针停驻猜想 | 窗口管理与输入隔离 | 是 |
 | R13 | Wayland 坐标钳位与触控板轻击 (Tap) 状态机规约 | 输入感知与窗口隔离 | 是 |
+| R14 | 快捷键模式释放时权威判定与 DBus 回声防抖规约 | 输入与按键 | 是 |
 
 ---
 
@@ -84,10 +85,22 @@
   - **证据**：Ubuntu Dock 为 Mutter 内部的 Clutter actor（Chrome 层级），位于 X11 工作区外部。在 Wayland 隔离模型下，当光标处于 Dock 区域时 Mutter 不会向 Xwayland 派发指针与按键事件；点击空白处不触发窗口激活或焦点迁移（`_NET_ACTIVE_WINDOW` 与 `is_active` 均保持不变）。XInput2、`query_pointer` 均收不到事件。依赖光标坐标或停留时间（如 200ms）在用户正常移动或晃动鼠标时极易误伤，且自动化测试注入（`warp_pointer`）会产生虚假通过日志。
   - **规则**：严禁在 UI 轮询中通过光标坐标停驻时间猜想物理“点击”；要么依赖真实焦点迁移事件（Alt+Tab、其他应用激活、Super键系统概览），要么在具备 `/dev/input` 权限时由 `evdev` 直接读取硬件级输入流。
 
-- [ ] R13: Wayland 坐标钳位与触控板轻击 (Tap) 状态机规约。
+- [ ] R13: Wayland 坐标钳位容差与首帧跳过任务栏规约。
   - **范围**：输入感知与窗口隔离
-  - **证据**：在 Wayland 环境下，光标移入 Ubuntu Dock (`x < 132`) 时，Xwayland 根窗口 `query_pointer` 坐标常被 Mutter 钳位在边界（`x=132`），导致 `x < wa.x` 几何判定失效；同时笔记本触控板轻击（Tap）由内核派发 `BTN_TOUCH` (330)，而非实体鼠标按键 `BTN_LEFT` (272)。若仅校验 `x < wa.x` 或仅监听 `BTN_LEFT`，会导致 Dock 空白处物理点击或轻击无法被感知。
+  - **证据**：
+    1. 在 Wayland 环境下，光标移入 Ubuntu Dock (`x < 132`) 时，Mutter 会停止向 Xwayland 派发 motion 事件，光标在 Xwayland 中被停滞在表面边界（如 `x=133`），且 Xwayland 从未收到 `LeaveNotify`，`child` 保持为 `vok_xid`。这导致首下若从 Dock 外进入可能因 `child==0` 成功隐藏，但后续只要光标曾在 Vok 内移动过，再次点击 Dock 时 `child != vok_xid` 恒为假，后续全部失效；
+    2. GTK 4 移除了 `set_skip_taskbar_hint`，若仅在 `connect_map` 后异步发送 ClientMessage，Mutter 在处理 `MapRequest` 时窗口属性尚无 `_NET_WM_STATE_SKIP_TASKBAR`，GNOME Shell / Ubuntu Dock 极易将其加入 Dock 并偶发驻留。
   - **规则**：
-    1. 窗口层级反向排除校验：外部点击判定统一采用 `is_outside = geom_outside || (vok_xid != 0 && child != vok_xid)`。由于 Vok 为 Xwayland 顶层窗口（XID: `0x1800004`），光标处于 Dock 时 Xwayland 的 child 为 0 或非 Vok 窗口，直接突破坐标钳位限制；
-    2. 触控板轻击状态机追踪：`EvdevMouseWatcher` 必须监听 `BTN_TOUCH`，并在按下至抬起时间 < 250ms 时将其识别为物理 Tap，与物理按键（`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA`）同等触发外置点击退让；
-    3. 日志因果性透明：严禁将切换应用/呼出终端时触发的普通 `Focus-Out` 误认为是点击 Dock 隐退，日志需明确记录是【内核硬件物理输入 (evdev)】还是【窗口前台焦点转移 (Focus-Out)】。
+    1. 避让边界钳位容差判定：必须在 `check_pointer_against_vok` 中引入边界钳位带容差判定（`border_clamped`）。由于 Vok 根容器拥有至少 20 逻辑像素（40 物理像素）的空白内边距，边缘 6 物理像素内绝无任何组件，只要物理光标落在避让边缘带内，100% 为合成器钳位所致，权威判定为外置点击；
+    2. 属性首帧前预写入：必须在窗口被合成器 Map 之前，通过 `change_property32(PropMode::APPEND)` 直接将 `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_STATE_SKIP_PAGER` 写入 X11 窗口的 `_NET_WM_STATE` 属性，并结合 ClientMessage 与 `StartupNotify=false`，杜绝任何无属性中间帧暴露给任务栏；
+    3. 触控板轻击状态机追踪：`EvdevMouseWatcher` 必须监听 `BTN_TOUCH`，并在按下至抬起时间 < 250ms 时将其识别为物理 Tap，与物理按键（`BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA`）同等触发外置点击退让。
+
+- [ ] R14: 快捷键模式释放时权威判定与 DBus 回声防抖规约。
+  - **范围**：输入与按键
+  - **证据**：
+    1. 首帧渲染提交耗时（~4.7ms）远低于人类正常敲击按键时长（60ms~150ms）。在首帧提交时若按键仍处于按下状态便提前断言为 Momentary，会导致短按在松手时触发 `PhysicalRelease` 被视作长按结束而无条件隐藏闪退；
+    2. 硬件 `evdev` 与 GNOME `custom-keybinding`（DBus `toggle`）存在微秒与数十毫秒的时间差，`evdev` 呼出呈现后，随后到达的 DBus `toggle` 会因看到窗口已可见而误触发关闭。
+  - **规则**：
+    1. 释放时权威判决（Release-Decided）：首帧提交时仅保持 `is_key_down: true` 与 `press_instant`，严禁提前断言为 Momentary；必须待真正的物理按键释放 `PhysicalRelease` 到达时，以 $\Delta t = \text{release} - \text{press}$ 与阈值（280ms）权威判定为 Toggle 或 Momentary；
+    2. 组合键原子追踪与热重载：`EvdevMonitor` 必须原子跟踪全量修饰键（Ctrl/Alt/Shift/Super）电平，主键按下时比对修饰键全匹配，并在主键或修饰键释放时触发 `Released`，支持通过 `update_target_hotkey` 动态重载；
+    3. DBus 回声防抖：窗口呈现后 350ms 内到达的 DBus `toggle` / 二次激活一律作为系统回声安全忽略，严禁误关窗口。

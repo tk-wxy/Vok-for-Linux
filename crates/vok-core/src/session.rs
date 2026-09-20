@@ -17,6 +17,7 @@ pub enum SessionState {
     /// 已完全呈现并捕获焦点
     Visible {
         generation: GenerationId,
+        press_instant: Instant,
         mode: HotkeyMode,
         is_key_down: bool,
     },
@@ -147,7 +148,7 @@ impl SessionStateMachine {
             (
                 SessionState::Revealing {
                     generation,
-                    press_instant: _,
+                    press_instant,
                     released_early,
                 },
                 SessionEvent::FrameCommitted(gen),
@@ -167,40 +168,49 @@ impl SessionStateMachine {
                         // 短按松手后，进入 Visible 模式常驻展示
                         self.state = SessionState::Visible {
                             generation,
+                            press_instant,
                             mode: HotkeyMode::Toggle,
                             is_key_down: false,
                         };
                         SessionAction::None
                     }
                 } else {
-                    // 按键仍处于按下状态，默认为长按 Momentary，直到松开
+                    // 核心修复：首帧渲染提交到达时（通常只需 ~4.7ms），人手必然仍处于按下状态。
+                    // 严禁在此处武断定性为 Momentary！保持 is_key_down = true 并保留 press_instant，
+                    // 待物理松开按键 (PhysicalRelease) 时再根据按住总时长进行权威判决。
                     self.state = SessionState::Visible {
                         generation,
-                        mode: HotkeyMode::Momentary,
+                        press_instant,
+                        mode: HotkeyMode::Toggle,
                         is_key_down: true,
                     };
                     SessionAction::None
                 }
             }
 
-            // 4. 显示中松手
+            // 4. 显示中松手：权威决断长按 (Momentary) 与短按 (Toggle)
             (
                 SessionState::Visible {
                     generation,
-                    mode,
+                    press_instant,
                     is_key_down: true,
+                    ..
                 },
-                SessionEvent::PhysicalRelease(_),
+                SessionEvent::PhysicalRelease(release_instant),
             ) => {
-                // 如果是长按 Momentary 模式，松手瞬间即隐！
+                let duration = release_instant.saturating_duration_since(press_instant);
+                let mode = HotkeyMode::from_duration(duration, self.tap_threshold);
+
                 if mode == HotkeyMode::Momentary {
+                    // 超过长按阈值（例如 > 280ms）：长按瞬态模式，松手即隐藏！
                     self.state = SessionState::Hiding { generation };
                     SessionAction::Hide(generation)
                 } else {
-                    // Toggle 模式下松开物理键，保持窗口可见
+                    // 小于等于长按阈值（例如 <= 280ms）：短按翻转模式，松手保持常驻展示！
                     self.state = SessionState::Visible {
                         generation,
-                        mode,
+                        press_instant,
+                        mode: HotkeyMode::Toggle,
                         is_key_down: false,
                     };
                     SessionAction::None
@@ -213,6 +223,7 @@ impl SessionStateMachine {
                     generation,
                     mode: HotkeyMode::Toggle,
                     is_key_down: false,
+                    ..
                 },
                 SessionEvent::PhysicalPress(_),
             ) => {
@@ -315,6 +326,7 @@ mod tests {
             sm.state(),
             SessionState::Visible {
                 generation: gen,
+                press_instant: t0,
                 mode: HotkeyMode::Toggle,
                 is_key_down: false,
             }
@@ -349,7 +361,8 @@ mod tests {
             sm.state(),
             SessionState::Visible {
                 generation: gen,
-                mode: HotkeyMode::Momentary,
+                press_instant: t0,
+                mode: HotkeyMode::Toggle,
                 is_key_down: true,
             }
         );
@@ -360,6 +373,47 @@ mod tests {
         // Momentary 松手即隐藏！
         assert_eq!(act, SessionAction::Hide(gen));
         assert_eq!(sm.state(), SessionState::Hiding { generation: gen });
+    }
+
+    #[test]
+    fn test_real_world_short_tap_after_frame_committed() {
+        let mut sm = SessionStateMachine::default();
+        let t0 = Instant::now();
+
+        // 1. 按下按键呼出 (t=0)
+        let act = sm.handle_event(SessionEvent::PhysicalPress(t0));
+        let gen = sm.current_generation();
+        assert_eq!(act, SessionAction::Reveal(gen));
+
+        // 2. 首帧渲染极速提交 (t=5ms，真实场景 ~4.7ms)
+        let _t_frame = t0 + Duration::from_millis(5);
+        let act = sm.handle_event(SessionEvent::FrameCommitted(gen));
+        assert_eq!(act, SessionAction::None);
+        // 此时窗口已可见，但由于人类敲击按键尚未松开，is_key_down 为 true
+        assert_eq!(
+            sm.state(),
+            SessionState::Visible {
+                generation: gen,
+                press_instant: t0,
+                mode: HotkeyMode::Toggle,
+                is_key_down: true,
+            }
+        );
+
+        // 3. 用户正常敲击短按，在 80ms 时松开按键 (t=80ms <= 280ms)
+        let t_release = t0 + Duration::from_millis(80);
+        let act = sm.handle_event(SessionEvent::PhysicalRelease(t_release));
+        // 关键断言：绝对不能隐藏！必须维持 Visible 并保持 Toggle 模式，且 is_key_down 变为 false
+        assert_eq!(act, SessionAction::None);
+        assert_eq!(
+            sm.state(),
+            SessionState::Visible {
+                generation: gen,
+                press_instant: t0,
+                mode: HotkeyMode::Toggle,
+                is_key_down: false,
+            }
+        );
     }
 
     #[test]

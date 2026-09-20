@@ -5,7 +5,7 @@ use thiserror::Error;
 /// 
 /// 按住物理按键超过此时间后松开被视作长按瞬态（Momentary，松手即隐），
 /// 小于等于此时间被视作短按翻转（Toggle，松手保持显示）。
-pub const DEFAULT_TAP_MAX_MS: u64 = 250;
+pub const DEFAULT_TAP_MAX_MS: u64 = 280;
 
 /// 热键工作模式
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -358,15 +358,15 @@ mod tests {
             HotkeyMode::Toggle
         );
 
-        // 持续 250ms：边界仍然判定为 Toggle
+        // 持续 280ms：边界仍然判定为 Toggle
         assert_eq!(
-            HotkeyMode::from_duration(Duration::from_millis(250), threshold),
+            HotkeyMode::from_duration(Duration::from_millis(DEFAULT_TAP_MAX_MS), threshold),
             HotkeyMode::Toggle
         );
 
-        // 持续 251ms：长按判定为 Momentary
+        // 持续 281ms：长按判定为 Momentary
         assert_eq!(
-            HotkeyMode::from_duration(Duration::from_millis(251), threshold),
+            HotkeyMode::from_duration(Duration::from_millis(DEFAULT_TAP_MAX_MS + 1), threshold),
             HotkeyMode::Momentary
         );
 

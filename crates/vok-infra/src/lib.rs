@@ -8,7 +8,8 @@ pub use desktop::{
     VokTray,
 };
 pub use input::{
-    EvdevMonitor, EvdevMouseWatcher, HotkeyEvent, InputInjector, KeyState, MockInputMonitor,
+    key_name_to_evdev_key, EvdevHotkeyTarget, EvdevMonitor, EvdevMouseWatcher, HotkeyEvent,
+    InputInjector, KeyState, MockInputMonitor,
 };
 pub use storage::{StorageClient, StorageError};
 pub use window::{OutsideClickWatcher, WindowAdapter, WorkAreaGeometry};

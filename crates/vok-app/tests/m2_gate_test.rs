@@ -64,6 +64,7 @@ fn test_m2_gate2_focus_lost_session_state_machine_lifecycle() {
         sm.state(),
         SessionState::Visible {
             generation: gen,
+            press_instant: t0,
             mode: HotkeyMode::Toggle,
             is_key_down: false,
         }

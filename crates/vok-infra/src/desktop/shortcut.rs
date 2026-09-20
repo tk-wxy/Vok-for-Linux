@@ -285,7 +285,7 @@ impl DesktopShortcut {
 
         let desktop_file = app_dir.join("com.vok.desktop.desktop");
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Vok\nComment=Linux 原生全屏沉浸式工作台\nExec={}\nIcon=view-grid-symbolic\nTerminal=false\nCategories=Utility;\nNoDisplay=true\n",
+            "[Desktop Entry]\nType=Application\nName=Vok\nComment=Linux 原生全屏沉浸式工作台\nExec={}\nIcon=view-grid-symbolic\nTerminal=false\nCategories=Utility;\nNoDisplay=true\nStartupNotify=false\n",
             exe_path.to_string_lossy()
         );
 

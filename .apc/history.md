@@ -108,3 +108,53 @@
   2. 新增 `OutsideClickWatcher`：通过 `xinput_xi_select_events` 监听 `XI_RawButtonPress`，被动捕获全局物理点击而不破坏指针状态；
   3. 维系 R3 规则守护：反向拖出代理模式（`is_in_proxy_mode`）自动挂起外部点击检测；
   4. 自动化集成测试全绿，Release 守护进程常驻就绪。
+
+### Session 2026-09-19 - 彻底清除停驻猜想表面工程，深度复盘 GNOME Wayland 任务栏空白点击隔离机理 (规则 R12 / 决策 §23)
+
+- **核心闭环**：
+  1. 查清日志与现实脱节根因：并发单测注入伪坐标 `(50, 500)` 造成虚假隐藏日志；
+  2. 彻底清除 200ms 停驻假动作，恪守 R12 规则；
+  3. 深入 Mutter 与 Clutter 源码完成 Wayland Chrome Actor 隔离机理推演，证实纯 X11 协议在无 evdev 权限下机制无法捕获 Dock 空白处吸收事件；
+  4. 固化真实有效失焦矩阵（Super键、Alt+Tab、顶栏、图标、Esc、快捷键、晃动免疫）；
+  5. 78 项测试全绿，Release 守护进程重新编译就绪。
+
+### Session 2026-09-19 - 攻克授权后监听未热加载问题，实现 EvdevMouseWatcher 动态热挂载与按键全覆盖 (决策 §24)
+
+- **核心闭环**：
+  1. **查清“授权了也没有实现”根因**：此前守护进程在用户授权前已启动，`OverlayWindow` 在启动初始化失败后将 `evdev_mouse_watcher` 固化为不可变 `None`；即便后续 Polkit 成功赋予系统 ACL，运行中的主窗口从未重试，导致物理点击监听处于未激活状态；
+  2. **落地动态热挂载与信号联动**：
+     - 将 `OverlayWindow` 改造为 `RefCell<Option<Rc<EvdevMouseWatcher>>>`，实现 `ensure_evdev_watcher()`；
+     - 每次 `reveal()` 呼出时自动自检并热挂载；
+     - `SettingsWindow` 授权成功回调直连 `overlay.ensure_evdev_watcher()`，实现授权瞬刻即刻激活底层监听；
+  3. **按键全覆盖**：支持 `BTN_LEFT`、`BTN_RIGHT`、`BTN_MIDDLE` 外部点击退让，使用非阻塞 `try_send` 消除 worker 线程隐患；
+  4. **全量构建与进程更新**：79 项自动化测试全绿，Clippy 零警告，全新 Release 守护进程正式上线，实机日志确凿记录已挂接 Dragonfly 3 Pro、ELAN Touchpad 与 Mouse 三路内核事件流。
+
+### Session 2026-09-19 - 攻克 Wayland 坐标钳位与触控板轻击 Tap 状态机，彻底攻克 Dock 空白处无法隐退难题 (决策 §25 / 规则 R13)
+
+- **核心闭环**：
+  1. **澄清日志与现实因果**：用户看到的 `【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)` 系切换窗口向 AI 发送消息时触发的标准失焦，而非 Dock 点击触发；
+  2. **攻克 Wayland 坐标钳位**：Mutter 内部 Clutter actor 拦截 Dock 指针事件导致 Xwayland 坐标停滞在边界 $x=132$，纯几何校验 `x < 132` 失效；升级为 `child != vok_xid` 反向排除，光标在 Dock 时 Xwayland 的 child 为 0 或非 Vok 顶级窗口，即刻判定为外置点击；
+  3. **落地触控板 Tap 状态机**：监听 `BTN_TOUCH`（330）电平，$\Delta t < 250\text{ms}$ 准确识别轻击，支持实体鼠标左/右/中/侧全按键；
+  4. **全量构建与守护进程上线**：73 项自动化测试全绿，Release 二进制常驻启动，实时日志清晰记录事件源与坐标判定。
+
+### Session 2026-09-19 - 攻克 Dock 首次点击成功后全失效与图标偶发驻留，落地边界钳位容差与首帧预写入 (决策 §26 / 规则 R13)
+
+- **核心闭环**：
+  1. **查清 Dock 首次有效后全失效因果链路**：初次从 Dock 外呼出时 `child=0x0` 能退让，但一旦光标移入 Vok 再移入 Dock，Mutter 停止派发 motion 使 Xwayland 坐标停滞在 $x=133$ 且 `child=vok_xid` 永不重置，后续点击判定全为假；
+  2. **落地 `border_clamped` 边缘容差算法**：利用 Vok 内部拥有 40px 绝对空白 padding 的几何事实，对避让边缘 6 物理像素内的点击权威判定为外置点击，彻底攻克连续点击全失效问题；
+  3. **查清任务栏偶发驻留因果链路**：GTK 4 窗口映射到 ClientMessage 到达之间存在数毫秒属性空窗期，Mutter / GNOME Shell `ShellWindowTracker` 偶发抢先捕获并将 Vok 写入 Dock 运行栈；
+  4. **落地 `window.realize()` 与 `change_property32` 预写入**：窗口在 Map 前即由 `change_property32(PropMode::APPEND)` 预置 `_NET_WM_STATE_SKIP_TASKBAR` 与 `_NET_WM_STATE_SKIP_PAGER`，消除首帧中间态；桌面项追加 `StartupNotify=false`；
+  5. **全量构建与进程上线**：82 项自动化测试全绿，全新 Release 生产守护进程常驻上线。
+### Session 2026-09-20 - 攻克长按无限震荡、输入法乱切与 350ms 迟滞，实现 0ms 极致跟手与输入法完全隔离 (决策 §27 ~ §30)
+
+- **核心闭环**：
+  1. **查清长按无限开闭交替震荡根因**：
+     - Linux / GNOME 键盘长按重复延迟（Typematic Delay）为 500ms，连发频率为 30ms；旧逻辑在 85ms 内未等到第 2 发便误判为单击关闭窗口，而在 500ms 连发到达时又重新打开窗口；且 GNOME 子进程调度抖动（高达 286ms）穿透了 110ms 静默超时，形成无限震荡；
+     - 升级为 350ms ~ 850ms 连发首发捕获窗口与 350ms 容差静默心跳，彻底终结了长按自动关闭与反复震荡；
+  2. **查清输入法在“拼音”与“en”之间来回切换根因**：
+     - UI 层 `key_controller` 仅拦截了 `key_pressed` 组合键，未监听 `key_released`，且放行了 `Alt_L` / `Alt_R` 单独按压；导致孤立修饰键释放事件泄露至 `search_entry` 和 Fcitx5，被输入法识别为中英切换指令；
+     - 在 `Capture` 阶段全面拦截并消费热键涉及的修饰键（Alt/Ctrl/Shift/Super）按下与释放，彻底阻断其进入底层 `GtkIMContext`，实现输入法零干扰；
+  3. **攻克长按松手关闭迟滞不跟手（350ms 延迟）难题**：
+     - 在 `OverlayWindow` 中引入 `is_initial_press_held` 状态机与 `connect_key_released` 监听；
+     - 窗口获取焦点后直接以微秒级（0ms）捕获物理松手事件，若按压时长 $> 280\text{ms}$（长按），立即瞬时隐藏窗口，真正实现“手抬即隐”、极致跟手；若 $\le 280\text{ms}$（短按），保持常驻展示并解锁搜索框文本输入；
+  4. **全量验证与构建上线**：81 项测试全绿，Release 二进制已更新拉起实测，用户确认“测试符合预期”。

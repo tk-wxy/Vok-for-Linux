@@ -40,6 +40,7 @@ pub struct OverlayWindow {
     reveal_time: Rc<Cell<std::time::Instant>>,
     is_in_proxy_mode: Rc<Cell<bool>>,
     has_gained_focus: Rc<Cell<bool>>,
+    is_initial_press_held: Rc<Cell<bool>>,
     outside_click_watcher: Option<Rc<vok_infra::OutsideClickWatcher>>,
     outside_tx: async_channel::Sender<()>,
     evdev_mouse_watcher: RefCell<Option<Rc<vok_infra::EvdevMouseWatcher>>>,
@@ -111,8 +112,17 @@ impl OverlayWindow {
         window.maximize();
         window.add_css_class("vok-window");
 
+        // 核心加固：立即 realize 窗口使底层 X11 Window 存在，并在映射前预写入 SKIP_TASKBAR 属性
+        gtk4::prelude::WidgetExt::realize(&window);
+        if let Some(id) = vok_infra::WindowAdapter::get_vok_window_id() {
+            let _ = vok_infra::WindowAdapter::set_window_skip_taskbar(id);
+        }
+
         // 绑定 map 信号：在窗口每次映射时确保权威注入 SKIP_TASKBAR 和 MAXIMIZED
         window.connect_map(|_| {
+            if let Some(id) = vok_infra::WindowAdapter::get_vok_window_id() {
+                let _ = vok_infra::WindowAdapter::set_window_skip_taskbar(id);
+            }
             vok_infra::WindowAdapter::apply_skip_taskbar_by_title("Vok Overlay");
         });
 
@@ -205,12 +215,21 @@ impl OverlayWindow {
             w_root.width(), w_root.width()
         );
 
-        // 7. 注册 Esc / 动态快捷键关闭
+        let is_in_proxy_mode = Rc::new(Cell::new(false));
+        let reveal_time = Rc::new(Cell::new(std::time::Instant::now()));
+        let previous_active_window = Rc::new(Cell::new(None));
+        let is_initial_press_held = Rc::new(Cell::new(false));
+
+        // 7. 注册 Esc / 动态快捷键按压与释放 (Capture 阶段，抢在 SearchEntry 与输入法前拦截)
         let key_controller = EventControllerKey::new();
-        // 核心加固：设置为 Capture 阶段，抢在 SearchEntry 等子控件前拦截 Escape 键
         key_controller.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let on_dismiss_esc = on_dismiss.clone();
+        let on_dismiss_release = on_dismiss.clone();
         let current_hotkey_for_key = current_hotkey.clone();
+        let current_hotkey_for_release = current_hotkey.clone();
+        let is_initial_press_for_release = is_initial_press_held.clone();
+        let reveal_time_for_release = reveal_time.clone();
+
         key_controller.connect_key_pressed(move |_ctrl, keyval, _keycode, modifier_state| {
             if keyval == Key::Escape {
                 debug!("【Esc 键拦截】用户按下 Esc 键请求退出工作台");
@@ -220,7 +239,7 @@ impl OverlayWindow {
                 return glib::Propagation::Stop;
             }
 
-            // 动态比对当前生效的唤醒快捷键 (实现窗口内再次按下唤醒键执行 Toggle 关闭)
+            // 若在窗口内捕获到全局唤醒快捷键，吞掉按键事件以防污染搜索框
             let cur = current_hotkey_for_key.borrow();
             let is_match = {
                 let ctrl = modifier_state.contains(gtk4::gdk::ModifierType::CONTROL_MASK);
@@ -245,15 +264,54 @@ impl OverlayWindow {
             };
 
             if is_match {
-                debug!("用户在窗口内再次按下唤醒快捷键，执行 Toggle 退出");
-                if let Some(cb) = on_dismiss_esc.borrow().as_ref() {
-                    cb();
-                }
+                return glib::Propagation::Stop;
+            }
+
+            // 拦截修饰键单独按下（如 Alt 或 Shift），避免输入法（如 Fcitx）或菜单栏捕获到孤立修饰键导致输入法中英乱切
+            let is_shortcut_modifier = (cur.modifiers.alt && (keyval == Key::Alt_L || keyval == Key::Alt_R))
+                || (cur.modifiers.ctrl && (keyval == Key::Control_L || keyval == Key::Control_R))
+                || (cur.modifiers.shift && (keyval == Key::Shift_L || keyval == Key::Shift_R))
+                || (cur.modifiers.super_key && (keyval == Key::Super_L || keyval == Key::Super_R));
+
+            if is_shortcut_modifier {
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
             }
         });
+
+        key_controller.connect_key_released(move |_ctrl, keyval, _keycode, _modifier_state| {
+            let cur = current_hotkey_for_release.borrow();
+            let is_target_key = if cur.keyval > 0 && cur.keyval == keyval.into_glib() {
+                true
+            } else if let Some(name) = keyval.name() {
+                name.eq_ignore_ascii_case(&cur.key_name)
+            } else {
+                false
+            };
+
+            let is_shortcut_modifier = (cur.modifiers.alt && (keyval == Key::Alt_L || keyval == Key::Alt_R))
+                || (cur.modifiers.ctrl && (keyval == Key::Control_L || keyval == Key::Control_R))
+                || (cur.modifiers.shift && (keyval == Key::Shift_L || keyval == Key::Shift_R))
+                || (cur.modifiers.super_key && (keyval == Key::Super_L || keyval == Key::Super_R));
+
+            if is_target_key || is_shortcut_modifier {
+                // 如果这是呼出时的初次按压 (Initial Press)
+                if is_initial_press_for_release.get() {
+                    is_initial_press_for_release.set(false);
+                    let elapsed = reveal_time_for_release.get().elapsed();
+                    if elapsed > std::time::Duration::from_millis(280) {
+                        info!("【UI硬件按键释放】检测到长按热键松开 (按住 {}ms)，即刻瞬时关闭工作台 (0ms 跟手响应)", elapsed.as_millis());
+                        if let Some(cb) = on_dismiss_release.borrow().as_ref() {
+                            cb();
+                        }
+                    } else {
+                        info!("【UI硬件按键释放】检测到短按热键释放 (按住 {}ms <= 280ms)，保持常驻展开", elapsed.as_millis());
+                    }
+                }
+            }
+        });
+
         window.add_controller(key_controller);
 
         // 7.1 搜索框 stop-search 兜底拦截
@@ -266,10 +324,6 @@ impl OverlayWindow {
                 }
             });
         }
-
-        let is_in_proxy_mode = Rc::new(Cell::new(false));
-        let reveal_time = Rc::new(Cell::new(std::time::Instant::now()));
-        let previous_active_window = Rc::new(Cell::new(None));
 
         // 8. 全局工作区外物理点击监听 (基于 XInput2 RawButtonPress，无侵入，不独占抓取，零按键干扰，零鼠标晃动误触发)
         let (outside_tx, outside_rx) = async_channel::unbounded::<()>();
@@ -488,6 +542,7 @@ impl OverlayWindow {
             reveal_time,
             is_in_proxy_mode,
             has_gained_focus,
+            is_initial_press_held,
             outside_click_watcher,
             outside_tx,
             evdev_mouse_watcher,
@@ -618,6 +673,7 @@ impl OverlayWindow {
         self.exit_proxy_anchor_mode();
         self.reveal_time.set(std::time::Instant::now());
         self.has_gained_focus.set(false);
+        self.is_initial_press_held.set(true);
 
         // 1. 动态刷新最新的真实系统工作区几何
         let current_geom = vok_infra::WindowAdapter::get_work_area();
@@ -695,6 +751,11 @@ impl OverlayWindow {
             }
         }
 
+        // 呼出前确保底层 X11 窗口的 SKIP_TASKBAR 已经提前写入属性，杜绝任何中间态被 Dock 抓取
+        if let Some(id) = vok_infra::WindowAdapter::get_vok_window_id() {
+            let _ = vok_infra::WindowAdapter::set_window_skip_taskbar(id);
+        }
+
         self.header.set_status(&format!("会话中 [{gen}]"));
         self.window.maximize();
         self.window.set_visible(true);
@@ -712,6 +773,7 @@ impl OverlayWindow {
     pub fn hide(&self) {
         self.exit_proxy_anchor_mode();
         self.has_gained_focus.set(false);
+        self.is_initial_press_held.set(false);
         if let Some(watcher) = self.outside_click_watcher.as_ref() {
             watcher.set_enabled(false);
         }

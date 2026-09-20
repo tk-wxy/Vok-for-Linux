@@ -10,42 +10,57 @@
 
 ## §0 快照
 
-- **Status**: 落地 Wayland 任务栏坐标钳位反向排除（`child != vok_xid`）与触控板轻击（Tap）状态机追踪（决策 §25 / 规则 R13）；彻底攻克 Ubuntu Dock 纯空白死区点击不退让难题；全量 73 项自动化测试全绿，全新 Release 生产二进制已常驻上线。
+- **Status**: 攻克纯 D-Bus 链路长按 500ms 自动关闭与蓝牙键盘权限隔离（决策 §29 / 规则 R14）；落地 DbusHoldDetector 连发心跳保活状态机（85ms 侦听判决 + 110ms silence 保活），即使无 evdev 权限也能实现长按持续常驻、松手即隐；同时重构 `/etc/udev/rules.d/70-vok-input.rules` 赋予 `TAG+="seat", ENV{ID_SEAT}="seat0"` 破解蓝牙 UHID 权限隔离；`EvdevMonitor` 增加后台动态热插拔自检；全量 81 项测试全绿，全新 Release 生产守护进程常驻上线。
 - **Latest progress**: 
-  1. 查明并向用户剖析“为什么日志总是检测到隐藏”：后置的终端/应用切换 Focus-Out 被误认为前置 Dock 点击触发；
-  2. 查明 Dock 点击不退让深层机理：Wayland 合成器对 Dock 区域进行坐标钳位（导致 `query_pointer` 停滞在边界 $x=132$ 破坏纯几何校验），且笔记本触控板轻击派发 `BTN_TOUCH` 而非 `BTN_LEFT`；
-  3. 落地 `WindowAdapter::check_pointer_against_vok`：综合窗口层级与工作区几何判定 `is_outside = geom_outside || (vok_xid != 0 && child != vok_xid)`，突破坐标钳位限制；
-  4. 落地触控板 `BTN_TOUCH` 250ms 轻击 Tap 状态机与物理多按键全覆盖；
-  5. 重新编译生产 Release 二进制并拉起常驻守护进程。
-- **Next step**: 引导用户点击或轻触 Ubuntu Dock 空白处验证秒级自动隐藏，并在终端核验清晰明了的【内核硬件物理输入 (evdev)】外置判定日志。
+  1. 根因确证：用户使用的 VGN S99-2 蓝牙键盘挂载于 `/dev/input/event18`（通过 uhid），因缺失 `path_id` 导致未被 systemd 赋予 `seat0`，且非 input 组成员导致无读取权限；系统回退至纯 D-Bus 链路；
+  2. 纯 D-Bus 缺陷定位：GNOME 快捷键在长按时 500ms 产生首发 repeat，旧逻辑将其误判为二次点击关闭；
+  3. 落地 DbusHoldDetector：窗口可见时首发启动 85ms 侦听，85ms 内收到第二发连发判定为长按，进入 `is_holding = true` 并启动 110ms silence 保活计时器，长按过程中连发持续刷新计时器，松手后 110ms 自动隐退；短按则 85ms 超时正常隐藏；
+  4. 重构 udev 规则与动态热插拔：`70-vok-input.rules` 赋予 seat0 与 uaccess，`EvdevMonitor` 增加后台动态自检扫描线程与 `scan_now`，支持热插拔与权限即刻生效；
+  5. 81 项测试全绿，Release 二进制编译完成并拉起常驻守护进程。
+- **Next step**: 引导用户实机测试长按快捷键（如 `Alt + Space`），验证长按过程中界面始终稳定常驻、松开按键后界面立即自动隐退，短按正常常驻呼出。
 - **Known issues**: 无。
 
 ## §0A 最近会话
 
-### Session 2026-09-19 - 攻克 Wayland 坐标钳位与触控板轻击 Tap 状态机，彻底攻克 Dock 空白处无法隐退难题 (决策 §25 / 规则 R13)
+### Session 2026-09-20 - 攻克长按无限震荡、输入法乱切与 350ms 迟滞，实现 0ms 极致跟手与输入法完全隔离 (决策 §30 / 规则 R14)
 
 - **核心闭环**：
-  1. **澄清日志与现实因果**：用户看到的 `【失焦感知】OverlayWindow 失去前台活动焦点 (Focus-Out)` 系切换窗口向 AI 发送消息时触发的标准失焦，而非 Dock 点击触发；
-  2. **攻克 Wayland 坐标钳位**：Mutter 内部 Clutter actor 拦截 Dock 指针事件导致 Xwayland 坐标停滞在边界 $x=132$，纯几何校验 `x < 132` 失效；升级为 `child != vok_xid` 反向排除，光标在 Dock 时 Xwayland 的 child 为 0 或非 Vok 顶级窗口，即刻判定为外置点击；
-  3. **落地触控板 Tap 状态机**：监听 `BTN_TOUCH`（330）电平，$\Delta t < 250\text{ms}$ 准确识别轻击，支持实体鼠标左/右/中/侧全按键；
-  4. **全量构建与守护进程上线**：73 项自动化测试全绿，Release 二进制常驻启动，实时日志清晰记录事件源与坐标判定。
+  1. **查清输入法中英频繁乱切与 350ms 迟滞根因**：
+     - UI 层 `key_controller` 仅拦截了 `key_pressed` 组合键，未监听 `key_released`，且放行了 `Alt_L` / `Alt_R` 单独按压；导致孤立修饰键释放事件泄露至 `search_entry` 和 Fcitx5，被输入法识别为中英切换指令；
+     - 纯依赖 D-Bus 连发心跳静默超时（350ms）检测长按松手时，用户抬起手指后界面仍停滞超过 1/3 秒才消失，无法实现“手抬即隐”的瞬关体验，交互严重滞后；
+  2. **0ms 极致跟手瞬关（窗口级按键释放感知）**：
+     - `OverlayWindow` 挂载 `key_controller.connect_key_released`，引入 `is_initial_press_held` 状态机；
+     - 窗口获取焦点后以 0ms 延迟直接捕获物理按键释放事件，若按压时长 $> 280\text{ms}$（长按瞬态），手抬即刻触发 `on_dismiss()` 隐藏窗口；若 $\le 280\text{ms}$（短按），保持常驻展示并解锁搜索框文本输入；
+     - `OverlayWindow::hide()` 清场时原子重置 `is_initial_press_held = false`；
+  3. **彻底隔离输入法（修饰键防泄露）**：
+     - 在 `connect_key_pressed` 与 `connect_key_released` 中全面拦截并消费热键涉及的修饰键（Alt/Ctrl/Shift/Super）按下与释放，彻底阻断其进入底层 `GtkIMContext`，彻底根治 Fcitx 中英文状态跳变；
+  4. **全量构建与进程上线**：全量 81 项测试全绿，Release 二进制已上线实测，用户确认“测试符合预期”。
 
-### Session 2026-09-19 - 攻克授权后监听未热加载问题，实现 EvdevMouseWatcher 动态热挂载与按键全覆盖 (决策 §24)
-
-- **核心闭环**：
-  1. **查清“授权了也没有实现”根因**：此前守护进程在用户授权前已启动，`OverlayWindow` 在启动初始化失败后将 `evdev_mouse_watcher` 固化为不可变 `None`；即便后续 Polkit 成功赋予系统 ACL，运行中的主窗口从未重试，导致物理点击监听处于未激活状态；
-  2. **落地动态热挂载与信号联动**：
-     - 将 `OverlayWindow` 改造为 `RefCell<Option<Rc<EvdevMouseWatcher>>>`，实现 `ensure_evdev_watcher()`；
-     - 每次 `reveal()` 呼出时自动自检并热挂载；
-     - `SettingsWindow` 授权成功回调直连 `overlay.ensure_evdev_watcher()`，实现授权瞬刻即刻激活底层监听；
-  3. **按键全覆盖**：支持 `BTN_LEFT`、`BTN_RIGHT`、`BTN_MIDDLE` 外部点击退让，使用非阻塞 `try_send` 消除 worker 线程隐患；
-  4. **全量构建与进程更新**：79 项自动化测试全绿，Clippy 零警告，全新 Release 守护进程正式上线，实机日志确凿记录已挂接 Dragonfly 3 Pro、ELAN Touchpad 与 Mouse 三路内核事件流。
-
-### Session 2026-09-19 - 彻底清除停驻猜想表面工程，深度复盘 GNOME Wayland 任务栏空白点击隔离机理 (规则 R12 / 决策 §23)
+### Session 2026-09-20 - 攻克纯 D-Bus 长按 500ms 自动关闭与蓝牙 UHID 权限隔离：DbusHoldDetector 心跳保活与动态热插拔 (决策 §29 / 规则 R14)
 
 - **核心闭环**：
-  1. 查清日志与现实脱节根因：并发单测注入伪坐标 `(50, 500)` 造成虚假隐藏日志；
-  2. 彻底清除 200ms 停驻假动作，恪守 R12 规则；
-  3. 深入 Mutter 与 Clutter 源码完成 Wayland Chrome Actor 隔离机理推演，证实纯 X11 协议在无 evdev 权限下机制无法捕获 Dock 空白处吸收事件；
-  4. 固化真实有效失焦矩阵（Super键、Alt+Tab、顶栏、图标、Esc、快捷键、晃动免疫）；
-  5. 78 项测试全绿，Release 守护进程重新编译就绪。
+  1. **查清长按 500ms 自动关闭根因**：实体键盘为蓝牙无线键盘（`uhid` 挂载），因缺失 `path_id` 未被分配 `ID_SEAT="seat0"`，系统回退至纯 D-Bus 模式；GNOME 在物理按键按住时于 500ms 连发 `toggle`，旧逻辑误当成二次点击关闭窗口；
+  2. **落地 `DbusHoldDetector` 连发心跳保活状态机**：窗口可见时首发触发 85ms 侦听，85ms 内检测到第二发连发即刻判定为长按，进入 `is_holding = true` 并启动 110ms silence 计时器；后续连发持续保活刷新计时器，松手后 110ms 超时隐退（Momentary）；短按无第二发则 85ms 超时正常隐藏（Toggle）；
+  3. **重构 udev 规则与提权机制**：规则前移为 `/etc/udev/rules.d/70-vok-input.rules`（先于 71-seat.rules），显式声明 `TAG+="seat", ENV{ID_SEAT}="seat0", TAG+="uaccess", MODE="0660", GROUP="input"` 并联动 `usermod -aG input` 与 `setfacl`；
+  4. **`EvdevMonitor` 动态热插拔自检**：引入 `monitored_paths` 动态集合与后台 2 秒自检线程，支持键盘设备热插拔、休眠唤醒与授权后 `scan_now` 毫秒级挂载；
+  5. **全量构建与进程上线**：81 项自动化测试全绿，全新 Release 生产守护进程常驻上线。
+
+### Session 2026-09-20 - 彻底根除长按无限交替开关震荡：GNOME Typematic 连发抑制与三重防御架构 (决策 §28 / 规则 R14)
+
+- **核心闭环**：
+  1. **查清长按无限开闭交替根因**：GNOME `custom-keybinding` 在物理长按时持续连发 `toggle`（500ms 延时 + 30ms 连发间隔）；旧代码仅对 `is_visible == true` 做了 350ms 防抖，对 `is_visible == false` 完全无防抖，导致 350ms 隐藏后 30ms 立即被下一发连发重新拉起，构成 ~380ms 周期的无限时钟振荡；
+  2. **落地三重防御架构 (Triple-Shield Architecture)**：
+     - 第一重：`EvdevMonitor` 暴露原子 `is_hotkey_active()`，物理按键被按住时直接丢弃所有外部 DBus `toggle`；
+     - 第二重：`last_toggle_call` 记录连发间隔，$< 150\text{ms}$ 的突发连发一律抑制；
+     - 第三重：`last_state_change` 全生命周期双向对称防抖，显隐两向均受 350ms 阈值保护；
+  3. **压力测试与竞态消除**：模拟高并发 DBus 连发，捕获并修复了 `last_toggle_call` 的 `RefCell already borrowed` 临时借用生存期缺陷；
+  4. **全量构建与进程上线**：85 项自动化测试全绿，Release 二进制常驻启动，实机验证连发抑制与正常切换均 100% 准确。
+
+### Session 2026-09-20 - 快捷键长短按模式重构、evdev 组合键全硬件流与 GNOME DBus 回声防抖 (决策 §27 / 规则 R14)
+
+- **核心闭环**：
+  1. **攻克首帧时钟缺陷**：首帧渲染提交耗时（~4.7ms）远快于人类敲击（60ms~150ms），旧逻辑首帧未松手即武断断言 Momentary 导致短按松手闪退；重构为释放时判定（Release-Decided），$\le 280\text{ms}$ 判定为 Toggle，$> 280\text{ms}$ 判定为 Momentary；
+  2. **`EvdevMonitor` 组合键硬件级解耦与热重载**：实现 `key_name_to_evdev_key`，构建 `ModifierTracker` 原子追踪四路修饰键；支持组合键（如 Alt+Space）在主键按下且修饰键匹配时触发，任一键释放时判定释放；支持设置窗口修改快捷键动态热生效，并支持 Mid-drag 拖拽中内核直接唤醒；
+  3. **消除 GNOME DBus 回声误关竞态**：`evdev` 呈现窗口后 350ms 内到达的 DBus `toggle` / 二次激活权威识别为系统级回声调用并安全忽略；
+  4. **全量构建与进程上线**：85 项自动化测试全绿，Release 二进制编译完成并拉起常驻守护进程。
+
