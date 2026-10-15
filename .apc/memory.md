@@ -56,11 +56,4 @@
   3. **压力测试与竞态消除**：模拟高并发 DBus 连发，捕获并修复了 `last_toggle_call` 的 `RefCell already borrowed` 临时借用生存期缺陷；
   4. **全量构建与进程上线**：85 项自动化测试全绿，Release 二进制常驻启动，实机验证连发抑制与正常切换均 100% 准确。
 
-### Session 2026-09-20 - 快捷键长短按模式重构、evdev 组合键全硬件流与 GNOME DBus 回声防抖 (决策 §27 / 规则 R14)
-
-- **核心闭环**：
-  1. **攻克首帧时钟缺陷**：首帧渲染提交耗时（~4.7ms）远快于人类敲击（60ms~150ms），旧逻辑首帧未松手即武断断言 Momentary 导致短按松手闪退；重构为释放时判定（Release-Decided），$\le 280\text{ms}$ 判定为 Toggle，$> 280\text{ms}$ 判定为 Momentary；
-  2. **`EvdevMonitor` 组合键硬件级解耦与热重载**：实现 `key_name_to_evdev_key`，构建 `ModifierTracker` 原子追踪四路修饰键；支持组合键（如 Alt+Space）在主键按下且修饰键匹配时触发，任一键释放时判定释放；支持设置窗口修改快捷键动态热生效，并支持 Mid-drag 拖拽中内核直接唤醒；
-  3. **消除 GNOME DBus 回声误关竞态**：`evdev` 呈现窗口后 350ms 内到达的 DBus `toggle` / 二次激活权威识别为系统级回声调用并安全忽略；
-  4. **全量构建与进程上线**：85 项自动化测试全绿，Release 二进制编译完成并拉起常驻守护进程。
 

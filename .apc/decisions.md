@@ -33,6 +33,7 @@
 - §27 **快捷键长短按模式判决重构、内核 evdev 组合键全硬件流与 GNOME DBus 回声防抖规范 (Release-Decided Hotkey & Evdev Chord Pipeline Policy)** — 根治首帧 4.7ms 误判 Momentary 闪退缺陷，以释放时差值权威判定长短按；`EvdevMonitor` 原子追踪修饰键与组合键解耦，支持热重载与 Mid-drag 呼出；350ms DBus 回声防抖彻底消除 evdev 与系统快捷键双轨竞态。
 - §28 **彻底根除长按无限交替开关震荡：GNOME Typematic 连发抑制与三重防御架构 (Typematic Repeat Suppression & Triple-Shield Toggle Architecture)** — 查明 GNOME typematic 自动连发（500ms delay + 30ms interval）与单向防抖漏洞造成的 ~380ms 振荡；构建硬件电平权威仲裁、连发心跳感知与双向对称防抖体系。
 - §29 **双轨长短按自适应状态机、蓝牙 UHID 设备 seat0 提权与 evdev 动态热插拔自检规范 (Dual-Track Hold Detector & Dynamic Evdev Hotplug Policy)** — 建立 DbusHoldDetector 连发心跳保活状态机（85ms 侦听判决 + 110ms silence 保活），彻底解决纯 D-Bus 链路长按 500ms 自动闪退问题；重构 `/etc/udev/rules.d/70-vok-input.rules` 赋予 `TAG+="seat", ENV{ID_SEAT}="seat0"` 破解蓝牙 UHID 权限隔离；`EvdevMonitor` 落地后台动态热插拔自检与权限即刻重载。
+- §30 **窗口级按键释放拦截与输入法隔离架构：0ms 极致跟手长按瞬关与 Fcitx/IBus 修饰键防泄露体系 (Zero-Latency Window Key-Release & IME Isolation Architecture)** — 挂载 Release 监听阻断修饰键泄露，长按手抬 0ms 瞬隐，彻底根治输入法乱切与 350ms 迟滞。
 
 ---
 
