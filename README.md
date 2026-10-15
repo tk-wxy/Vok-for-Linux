@@ -1,6 +1,7 @@
 # Vok (Linux)
 
-面向 Linux 桌面环境的极速原生全屏工作台。
+面向 Linux 桌面环境的极速原生全屏工作台。  
+*Blazing-fast native Linux fullscreen workbench for mid-drag file staging and seamless workflow.*
 
 核心聚焦：**临时文件流转中转站 (Stage) + 外部拖拽中呼出入站 (Mid-drag Summon) + 全屏沉浸面板 (三栏 1:2:1 布局)**。
 

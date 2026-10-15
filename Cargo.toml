@@ -11,6 +11,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Vok Team"]
 license = "MIT OR Apache-2.0"
+description = "Blazing-fast native Linux fullscreen workbench for mid-drag file staging and seamless workflow."
+repository = "https://github.com/tk-wxy/Vok-for-Linux"
 
 [workspace.dependencies]
 # Internal workspace crates
