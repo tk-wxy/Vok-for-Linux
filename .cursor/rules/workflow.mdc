@@ -1,7 +1,0 @@
----
-description: APC task-end protocol
-alwaysApply: true
----
-
-Before the final summary, follow `.apc/workflow.md` §4. Persist only
-material, verified knowledge or state; no-op is valid.
